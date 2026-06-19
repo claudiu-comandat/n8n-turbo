@@ -87,7 +87,7 @@ func builtinNodeTypes() []NodeType {
 			})),
 		action("n8n-nodes-base.respondToWebhook", "Respond to Webhook", "Returns a response for a webhook execution", "webhook",
 			respondToWebhookProps()...).
-			withVersions(1.4).
+			withVersions(1, 1.4).
 			withCredentialDisplay("jwtAuth", true, "respondWith", "jwt"),
 		action("n8n-nodes-base.noOp", "No Operation", "Passes input data through unchanged", "transform"),
 		action("n8n-nodes-base.set", "Set", "Adds or edits item fields", "transform",
@@ -919,6 +919,7 @@ func (node NodeType) withVersions(versions ...float64) NodeType {
 	}
 	if len(versions) == 1 {
 		node.Version = versions[0]
+		node.DefaultVersion = versions[0]
 		return node
 	}
 	node.Version = versions
@@ -1295,8 +1296,9 @@ func respondToWebhookProps() []Property {
 }
 
 func compressionProps() []Property {
-	inputFields := text("Input Binary Field(s)", "inputBinaryFieldNames", "data")
+	inputFields := text("Input Binary Field(s)", "binaryPropertyName", "data")
 	inputFields.Description = "The name of the input binary field(s) containing the file(s) to compress or decompress"
+	inputFields.TypeOptions = map[string]any{"multipleValues": true}
 	outputPrefix := text("Output Prefix", "outputPrefix", "file_")
 	outputPrefix.DisplayOptions = map[string]any{"show": map[string][]any{"operation": []any{"decompress"}}}
 

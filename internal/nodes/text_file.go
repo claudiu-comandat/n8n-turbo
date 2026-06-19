@@ -213,6 +213,7 @@ func (Compression) Execute(ctx context.Context, in engine.ExecuteInput) (datapla
 func compressionInputFields(parameters map[string]any, operation string) []string {
 	raw := firstNonEmptyNode(
 		stringParam(parameters, "inputBinaryFieldNames"),
+		stringParam(parameters, "binaryPropertyName"),
 		stringParam(parameters, "inputBinaryPropertyName"),
 		stringParam(parameters, "fieldName"),
 	)
