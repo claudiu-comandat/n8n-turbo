@@ -86,7 +86,8 @@ func builtinNodeTypes() []NodeType {
 				numberProp("Hours Interval", "hoursInterval", 1),
 			})),
 		action("n8n-nodes-base.respondToWebhook", "Respond to Webhook", "Returns a response for a webhook execution", "webhook",
-			jsonProp("Response Body", "responseBody", "{}")),
+			respondToWebhookProps()...).
+			withVersions(1, 1.1, 1.2, 1.3, 1.4),
 		action("n8n-nodes-base.noOp", "No Operation", "Passes input data through unchanged", "transform"),
 		action("n8n-nodes-base.set", "Set", "Adds or edits item fields", "transform",
 			selectProp("Mode", "mode", "manual", []Option{{Name: "Manual", Value: "manual"}, {Name: "JSON", Value: "json"}}),
@@ -1236,6 +1237,43 @@ func webhookOptionsCollection() Property {
 	})
 	prop.Default = map[string]any{"allowedOrigins": "*"}
 	return prop
+}
+
+func respondToWebhookProps() []Property {
+	responseBody := jsonProp("Response Body", "responseBody", "{\n  \"status\": \"success\"\n}")
+	responseBody.DisplayOptions = map[string]any{"show": map[string][]any{"respondWith": []any{"json"}}}
+	textBody := textArea("Response Body", "responseBody", "")
+	textBody.DisplayOptions = map[string]any{"show": map[string][]any{"respondWith": []any{"text"}}}
+	redirectURL := text("Redirect URL", "redirectURL", "")
+	redirectURL.DisplayOptions = map[string]any{"show": map[string][]any{"respondWith": []any{"redirect"}}}
+
+	optionsProp := collection("Options", "options", []Property{
+		numberProp("Response Code", "responseCode", 200),
+		text("Response Data Property Name", "responseDataPropertyName", ""),
+		text("Response Content Type", "responseContentType", ""),
+		text("Property Name for Binary Data", "binaryPropertyName", "data"),
+		fixedCollectionGroup("Response Headers", "responseHeaders", "entries", "Entries", true, []Property{
+			text("Name", "name", ""),
+			text("Value", "value", ""),
+		}),
+	})
+	optionsProp.Default = map[string]any{}
+
+	return []Property{
+		selectProp("Respond With", "respondWith", "json", []Option{
+			{Name: "JSON", Value: "json", Description: "Respond with a JSON body"},
+			{Name: "Text", Value: "text", Description: "Respond with a plain text body"},
+			{Name: "Binary", Value: "binary", Description: "Respond with binary data from the incoming item"},
+			{Name: "First Incoming Item", Value: "firstIncomingItem", Description: "Respond with the first incoming item"},
+			{Name: "All Incoming Items", Value: "allIncomingItems", Description: "Respond with all incoming items"},
+			{Name: "No Body", Value: "noData", Description: "Respond without a body"},
+			{Name: "Redirect", Value: "redirect", Description: "Redirect the request"},
+		}),
+		responseBody,
+		textBody,
+		redirectURL,
+		optionsProp,
+	}
 }
 
 func propertyOptions(values []Property) []Option {

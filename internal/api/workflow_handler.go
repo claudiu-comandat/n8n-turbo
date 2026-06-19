@@ -130,6 +130,8 @@ func (s *Server) handleSaveWorkflow(w http.ResponseWriter, r *http.Request) {
 	if workflow.Name == "" {
 		workflow.Name = "My workflow"
 	}
+	normalizeWorkflowDefaults(&workflow)
+	normalizeNodeDefaults(workflow.Nodes)
 	if err := validateWorkflow(workflow); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -255,6 +257,8 @@ func (s *Server) handleImportWorkflow(w http.ResponseWriter, r *http.Request) {
 	if workflow.Name == "" {
 		workflow.Name = "Imported workflow"
 	}
+	normalizeWorkflowDefaults(&workflow)
+	normalizeNodeDefaults(workflow.Nodes)
 	if err := validateWorkflow(workflow); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -537,7 +541,7 @@ func workflowFromRow(row *persistence.WorkflowRow) (dataplane.Workflow, error) {
 	if err := json.Unmarshal(row.Nodes, &workflow.Nodes); err != nil {
 		return workflow, err
 	}
-	normalizeWebhookNodeDefaults(workflow.Nodes)
+	normalizeNodeDefaults(workflow.Nodes)
 	if err := json.Unmarshal(row.Connections, &workflow.Connections); err != nil {
 		return workflow, err
 	}
@@ -549,19 +553,29 @@ func workflowFromRow(row *persistence.WorkflowRow) (dataplane.Workflow, error) {
 	return workflow, nil
 }
 
-func normalizeWebhookNodeDefaults(nodes []dataplane.Node) {
+func normalizeNodeDefaults(nodes []dataplane.Node) {
 	for index := range nodes {
-		if nodes[index].Type != "n8n-nodes-base.webhook" {
-			continue
-		}
-		if nodes[index].WebhookID == "" {
-			nodes[index].WebhookID = firstNonEmpty(nodes[index].ID, stableNodeID(nodes[index].Name))
-		}
 		if nodes[index].Parameters == nil {
 			nodes[index].Parameters = map[string]any{}
 		}
-		if strings.TrimSpace(parameterText(nodes[index].Parameters, "path")) == "" {
-			nodes[index].Parameters["path"] = nodes[index].WebhookID
+		switch nodes[index].Type {
+		case "n8n-nodes-base.webhook":
+			if nodes[index].WebhookID == "" {
+				nodes[index].WebhookID = firstNonEmpty(nodes[index].ID, stableNodeID(nodes[index].Name))
+			}
+			if strings.TrimSpace(parameterText(nodes[index].Parameters, "path")) == "" {
+				nodes[index].Parameters["path"] = nodes[index].WebhookID
+			}
+		case "n8n-nodes-base.respondToWebhook":
+			if strings.TrimSpace(parameterText(nodes[index].Parameters, "respondWith")) == "" {
+				nodes[index].Parameters["respondWith"] = "json"
+			}
+			if _, ok := nodes[index].Parameters["responseBody"]; !ok {
+				nodes[index].Parameters["responseBody"] = "{\n  \"status\": \"success\"\n}"
+			}
+			if _, ok := nodes[index].Parameters["options"]; !ok {
+				nodes[index].Parameters["options"] = map[string]any{}
+			}
 		}
 	}
 }
