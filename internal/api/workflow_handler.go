@@ -285,7 +285,7 @@ func (s *Server) handleDeactivateWorkflow(w http.ResponseWriter, r *http.Request
 func (s *Server) setWorkflowActive(w http.ResponseWriter, r *http.Request, active bool) {
 	id := chi.URLParam(r, "id")
 	if err := s.workflowStore.SetActive(r.Context(), id, active); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	row, err := s.workflowStore.GetByID(r.Context(), id)
@@ -305,7 +305,13 @@ func (s *Server) setWorkflowActive(w http.ResponseWriter, r *http.Request, activ
 		s.stopWorkflowSchedule(id)
 		s.pushWorkflowDeactivated(id)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"active": active}})
+	updated, err := workflowFromRow(row)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.decorateWorkflowForFrontend(r, &updated)
+	writeJSON(w, http.StatusOK, map[string]any{"data": updated})
 }
 
 func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -594,8 +600,26 @@ func (s *Server) decorateWorkflowForFrontend(r *http.Request, workflow *dataplan
 	setWorkflowRaw(workflow, "tags", []map[string]any{})
 	setWorkflowRaw(workflow, "usedCredentials", []map[string]any{})
 	setWorkflowRaw(workflow, "isArchived", false)
-	if workflow.VersionID != "" {
+	if workflow.Active && workflow.VersionID != "" {
 		setWorkflowRaw(workflow, "activeVersionId", workflow.VersionID)
+		setWorkflowRaw(workflow, "activeVersion", workflowActiveVersion(*workflow))
+	}
+}
+
+func workflowActiveVersion(workflow dataplane.Workflow) map[string]any {
+	createdAt := time.Now().UTC()
+	if workflow.UpdatedAt != nil {
+		createdAt = *workflow.UpdatedAt
+	} else if workflow.CreatedAt != nil {
+		createdAt = *workflow.CreatedAt
+	}
+	return map[string]any{
+		"workflowId":             workflow.ID,
+		"versionId":              workflow.VersionID,
+		"name":                   nil,
+		"description":            nil,
+		"createdAt":              createdAt.Format(time.RFC3339Nano),
+		"workflowPublishHistory": []map[string]any{},
 	}
 }
 
