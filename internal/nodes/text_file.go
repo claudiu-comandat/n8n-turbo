@@ -38,14 +38,35 @@ type Markdown struct{}
 type ConvertToFile struct{}
 
 func (Compression) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
-	operation := stringParam(in.Node.Parameters, "operation")
-	field := stringParam(in.Node.Parameters, "fieldName", "field")
+	operation := firstNonEmptyNode(stringParam(in.Node.Parameters, "operation"), "compress")
+	inputFields := compressionInputFields(in.Node.Parameters, operation)
+	field := inputFields[0]
 	if field == "" {
 		field = "data"
 	}
+	outputPrefix := firstNonEmptyNode(stringParam(in.Node.Parameters, "outputPrefix"), "file_")
 	result := make([]dataplane.Item, 0, len(firstInput(in.InputData)))
 	for _, item := range firstInput(in.InputData) {
 		next := cloneItem(item)
+		if operation == "decompress" {
+			if binary, ok := firstAvailableBinary(item.Binary, inputFields); ok {
+				if in.BinaryStore != nil {
+					outputs, err := decompressBinaryFieldsToStore(ctx, in.BinaryStore, binary, outputPrefix)
+					if err != nil {
+						return nil, err
+					}
+					if next.Binary == nil {
+						next.Binary = map[string]dataplane.Binary{}
+					}
+					for name, output := range outputs {
+						next.Binary[name] = output
+					}
+					next.JSON["fileCount"] = len(outputs)
+					result = append(result, next)
+					continue
+				}
+			}
+		}
 		if binary, ok := item.Binary[field]; ok {
 			if in.BinaryStore != nil {
 				outBinary, fileName, mimeType, err := transformBinaryInStore(ctx, in.BinaryStore, binary, operation)
@@ -189,6 +210,50 @@ func (Compression) Execute(ctx context.Context, in engine.ExecuteInput) (datapla
 	return dataplane.MainOutput(result), nil
 }
 
+func compressionInputFields(parameters map[string]any, operation string) []string {
+	raw := firstNonEmptyNode(
+		stringParam(parameters, "inputBinaryFieldNames"),
+		stringParam(parameters, "inputBinaryPropertyName"),
+		stringParam(parameters, "fieldName"),
+	)
+	if raw == "" {
+		if operation == "decompress" {
+			raw = "zipFile"
+		} else {
+			raw = "data"
+		}
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	if len(result) == 0 {
+		result = append(result, raw)
+	}
+	return result
+}
+
+func firstAvailableBinary(binary map[string]dataplane.Binary, fields []string) (dataplane.Binary, bool) {
+	if len(binary) == 0 {
+		return dataplane.Binary{}, false
+	}
+	for _, field := range fields {
+		if value, ok := binary[field]; ok {
+			return value, true
+		}
+	}
+	for _, value := range binary {
+		return value, true
+	}
+	return dataplane.Binary{}, false
+}
+
 func transformBinaryInStore(ctx context.Context, store binarydata.Store, binary dataplane.Binary, operation string) (dataplane.Binary, string, string, error) {
 	switch operation {
 	case "decompress":
@@ -259,6 +324,77 @@ func decompressBinaryToStore(ctx context.Context, store binarydata.Store, binary
 		return dataplane.Binary{}, "", "", err
 	}
 	return unzipBinaryToStore(ctx, store, binary)
+}
+
+func decompressBinaryFieldsToStore(ctx context.Context, store binarydata.Store, binary dataplane.Binary, outputPrefix string) (map[string]dataplane.Binary, error) {
+	if outputPrefix == "" {
+		outputPrefix = "file_"
+	}
+	if isGzipBinary(binary) && !looksLikeZipBinary(binary) {
+		outBinary, _, _, err := gunzipBinaryToStore(ctx, store, binary)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]dataplane.Binary{outputPrefix + "0": outBinary}, nil
+	}
+	reader, err := binarydata.Open(ctx, store, binary)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	file, err := os.CreateTemp("", "n8n-turbo-zip-*")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := file.Name()
+	defer os.Remove(tmpPath)
+	if _, err := io.Copy(file, reader); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	archive, err := zip.OpenReader(tmpPath)
+	if err != nil {
+		if isGzipBinary(binary) {
+			outBinary, _, _, gzipErr := gunzipBinaryToStore(ctx, store, binary)
+			if gzipErr == nil {
+				return map[string]dataplane.Binary{outputPrefix + "0": outBinary}, nil
+			}
+		}
+		return nil, err
+	}
+	defer archive.Close()
+	outputs := map[string]dataplane.Binary{}
+	index := 0
+	for _, entry := range archive.File {
+		if entry.FileInfo().IsDir() {
+			continue
+		}
+		stream, err := entry.Open()
+		if err != nil {
+			return nil, err
+		}
+		fileName := firstNonEmptyNode(entry.Name, fmt.Sprintf("file-%d", index))
+		mimeType := mimeTypeFromFileName(fileName, "application/octet-stream")
+		ref, putErr := store.Put(ctx, mimeType, fileName, stream)
+		closeErr := stream.Close()
+		if putErr == nil {
+			putErr = closeErr
+		}
+		if putErr != nil {
+			return nil, putErr
+		}
+		outBinary := binarydata.BinaryFromRef(ref)
+		outBinary.FileExtension = strings.TrimPrefix(filepath.Ext(fileName), ".")
+		outputs[fmt.Sprintf("%s%d", outputPrefix, index)] = outBinary
+		index++
+	}
+	if len(outputs) == 0 {
+		return nil, fmt.Errorf("compression: zip archive is empty")
+	}
+	return outputs, nil
 }
 
 func gunzipBinaryToStore(ctx context.Context, store binarydata.Store, binary dataplane.Binary) (dataplane.Binary, string, string, error) {

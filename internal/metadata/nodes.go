@@ -219,7 +219,8 @@ func builtinNodeTypes() []NodeType {
 			option("Append To File", "appendToFile", "boolean", false, nil),
 			fixedCollection("Options", "options", []Property{text("Return Object Type", "returnObjType", "binary"), text("Output Property Name", "dataPropertyName", "data"), text("Allowed Paths", "allowedPaths", ""), numberProp("Max File Size", "maxFileSize", 52428800)})),
 		action("n8n-nodes-base.compression", "Compression", "Compresses or extracts data", "utility",
-			selectProp("Operation", "operation", "compress", []Option{{Name: "Compress", Value: "compress"}, {Name: "Decompress", Value: "decompress"}})),
+			compressionProps()...).
+			withVersions(1, 1.1),
 		action("n8n-nodes-base.html", "HTML", "Extracts or generates HTML", "transform",
 			selectProp("Operation", "operation", "generateHtml", []Option{{Name: "Generate HTML", Value: "generateHtml"}, {Name: "Extract HTML Content", Value: "extractHtmlContent"}}),
 			textArea("HTML", "html", ""),
@@ -1290,6 +1291,22 @@ func respondToWebhookProps() []Property {
 		responseDataSource,
 		inputFieldName,
 		optionsProp,
+	}
+}
+
+func compressionProps() []Property {
+	inputFields := text("Input Binary Field(s)", "inputBinaryFieldNames", "data")
+	inputFields.Description = "The name of the input binary field(s) containing the file(s) to compress or decompress"
+	outputPrefix := text("Output Prefix", "outputPrefix", "file_")
+	outputPrefix.DisplayOptions = map[string]any{"show": map[string][]any{"operation": []any{"decompress"}}}
+
+	return []Property{
+		selectProp("Operation", "operation", "compress", []Option{
+			{Name: "Compress", Value: "compress", Description: "Compress files into a zip or gzip archive"},
+			{Name: "Decompress", Value: "decompress", Description: "Decompress zip or gzip archives"},
+		}),
+		inputFields,
+		outputPrefix,
 	}
 }
 
