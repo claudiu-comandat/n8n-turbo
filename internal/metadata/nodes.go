@@ -87,7 +87,7 @@ func builtinNodeTypes() []NodeType {
 			})),
 		action("n8n-nodes-base.respondToWebhook", "Respond to Webhook", "Returns a response for a webhook execution", "webhook",
 			respondToWebhookProps()...).
-			withVersions(1, 1.1, 1.2, 1.3, 1.4, 1.5).
+			withVersions(1.4).
 			withCredentialDisplay("jwtAuth", true, "respondWith", "jwt"),
 		action("n8n-nodes-base.noOp", "No Operation", "Passes input data through unchanged", "transform"),
 		action("n8n-nodes-base.set", "Set", "Adds or edits item fields", "transform",
