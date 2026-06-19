@@ -1298,12 +1298,11 @@ func respondToWebhookProps() []Property {
 func compressionProps() []Property {
 	inputFields := text("Input Binary Field(s)", "binaryPropertyName", "data")
 	inputFields.Description = "The name of the input binary field(s) containing the file(s) to compress or decompress"
-	inputFields.TypeOptions = map[string]any{"multipleValues": true}
 	outputPrefix := text("Output Prefix", "outputPrefix", "file_")
 	outputPrefix.DisplayOptions = map[string]any{"show": map[string][]any{"operation": []any{"decompress"}}}
 
 	return []Property{
-		selectProp("Operation", "operation", "compress", []Option{
+		selectProp("Operation", "operation", "decompress", []Option{
 			{Name: "Compress", Value: "compress", Description: "Compress files into a zip or gzip archive"},
 			{Name: "Decompress", Value: "decompress", Description: "Decompress zip or gzip archives"},
 		}),
