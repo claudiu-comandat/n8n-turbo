@@ -1,0 +1,41 @@
+services:
+  n8n-turbo:
+    image: n8n-turbo:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY}
+      N8N_SETUP_EMAIL: ${N8N_SETUP_EMAIL:-owner@n8n.local}
+      N8N_SETUP_PASSWORD: ${N8N_SETUP_PASSWORD:?set N8N_SETUP_PASSWORD}
+      N8N_HOST: 0.0.0.0
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-http://localhost:5678}
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678}
+      DB_TYPE: sqlite
+      DB_SQLITE_DATABASE: /app/data/database.sqlite
+      N8N_TURBO_FRONTEND_DIR: /app/ui
+      UI_PATH: /app/ui
+      N8N_TURBO_BINARY_DATA_PATH: /app/storage/binary
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
+    volumes:
+      - n8n_data:/app/data
+      - n8n_logs:/app/logs
+      - n8n_storage:/app/storage
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  n8n_data:
+  n8n_logs:
+  n8n_storage:

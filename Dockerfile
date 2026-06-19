@@ -1,0 +1,42 @@
+FROM golang:1.25-alpine AS go-builder
+
+WORKDIR /src
+RUN apk add --no-cache ca-certificates git tzdata
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" -o /out/n8n-turbo ./cmd/n8n-turbo
+
+FROM alpine:3.22 AS runtime
+
+RUN apk add --no-cache ca-certificates tzdata curl go python3 poppler-utils ghostscript imagemagick && addgroup -g 1000 n8n && adduser -u 1000 -G n8n -s /bin/sh -D n8n
+WORKDIR /app
+COPY --from=go-builder /out/n8n-turbo /app/n8n-turbo
+COPY ui /app/ui
+RUN mkdir -p /app/data /app/logs /app/storage/binary && chown -R n8n:n8n /app
+USER n8n
+VOLUME ["/app/data", "/app/logs", "/app/storage"]
+EXPOSE 5678
+ENV N8N_HOST=0.0.0.0
+ENV N8N_PORT=5678
+ENV N8N_PROTOCOL=http
+ENV N8N_PATH=/
+ENV N8N_TURBO_FRONTEND_DIR=/app/ui
+ENV UI_PATH=/app/ui
+ENV DB_TYPE=sqlite
+ENV DB_SQLITE_DATABASE=/app/data/database.sqlite
+ENV N8N_TURBO_BINARY_DATA_PATH=/app/storage/binary
+ENV N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+ENV N8N_LOG_LEVEL=info
+ENV GENERIC_TIMEZONE=UTC
+ENV N8N_EXECUTIONS_DATA_SAVE_ON_ERROR=all
+ENV N8N_EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
+ENV N8N_EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS=true
+ENV N8N_EXECUTIONS_DATA_SAVE_ON_PROGRESS=false
+ENV N8N_CONCURRENCY_PRODUCTION_LIMIT=0
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 CMD curl -fsS http://127.0.0.1:5678/healthz || exit 1
+ENTRYPOINT ["/app/n8n-turbo"]
