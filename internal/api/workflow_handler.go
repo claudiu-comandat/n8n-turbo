@@ -566,44 +566,8 @@ func normalizeNodeDefaults(nodes []dataplane.Node) {
 			if strings.TrimSpace(parameterText(nodes[index].Parameters, "path")) == "" {
 				nodes[index].Parameters["path"] = nodes[index].WebhookID
 			}
-		case "n8n-nodes-base.respondToWebhook":
-			if strings.TrimSpace(parameterText(nodes[index].Parameters, "respondWith")) == "" {
-				nodes[index].Parameters["respondWith"] = "json"
-			}
-			if _, ok := nodes[index].Parameters["responseBody"]; !ok {
-				nodes[index].Parameters["responseBody"] = "{\n  \"status\": \"success\"\n}"
-			}
-			if _, ok := nodes[index].Parameters["options"]; !ok {
-				nodes[index].Parameters["options"] = map[string]any{}
-			}
-		case "n8n-nodes-base.compression":
-			if strings.TrimSpace(parameterText(nodes[index].Parameters, "operation")) == "" {
-				if looksLikeDecompressionNode(nodes[index].Name) {
-					nodes[index].Parameters["operation"] = "decompress"
-				} else {
-					nodes[index].Parameters["operation"] = "compress"
-				}
-			}
-			if strings.TrimSpace(parameterText(nodes[index].Parameters, "inputBinaryFieldNames")) == "" {
-				if parameterText(nodes[index].Parameters, "operation") == "decompress" {
-					nodes[index].Parameters["inputBinaryFieldNames"] = "zipFile"
-				} else {
-					nodes[index].Parameters["inputBinaryFieldNames"] = "data"
-				}
-			}
-			if parameterText(nodes[index].Parameters, "operation") == "decompress" && strings.TrimSpace(parameterText(nodes[index].Parameters, "outputPrefix")) == "" {
-				nodes[index].Parameters["outputPrefix"] = "file_"
-			}
 		}
 	}
-}
-
-func looksLikeDecompressionNode(name string) bool {
-	name = strings.ToLower(strings.TrimSpace(name))
-	return strings.Contains(name, "dezarhiv") ||
-		strings.Contains(name, "decompress") ||
-		strings.Contains(name, "unzip") ||
-		strings.Contains(name, "extract")
 }
 
 func stableNodeID(seed string) string {
