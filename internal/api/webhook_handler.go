@@ -419,15 +419,22 @@ func webhookResponseFromRespondNode(node dataplane.Node, items []dataplane.Item)
 	}
 	switch respondWith {
 	case "allincomingitems":
-		return webhookHTTPResponse{StatusCode: statusCode, Headers: headers, Body: itemJSONList(items), ContentType: firstNonEmpty(contentType, "application/json")}
+		body := any(itemJSONList(items))
+		if responseKey := parameterText(options, "responseKey"); responseKey != "" {
+			body = nestedResponseField(responseKey, body)
+		}
+		return webhookHTTPResponse{StatusCode: statusCode, Headers: headers, Body: body, ContentType: firstNonEmpty(contentType, "application/json")}
 	case "firstentryjson", "firstincomingitem":
 		body := itemBody(items)
 		if property := firstNonEmpty(parameterText(options, "responseDataPropertyName"), parameterText(node.Parameters, "responseDataPropertyName")); property != "" && len(items) > 0 {
 			body = extractJSONPath(items[0].JSON, property)
 		}
+		if responseKey := parameterText(options, "responseKey"); responseKey != "" {
+			body = nestedResponseField(responseKey, body)
+		}
 		return webhookHTTPResponse{StatusCode: statusCode, Headers: headers, Body: body, ContentType: firstNonEmpty(contentType, "application/json")}
 	case "firstentrybinary", "binary":
-		binary, ok := firstRespondBinary(items, firstNonEmpty(parameterText(options, "binaryPropertyName"), parameterText(node.Parameters, "binaryPropertyName"), "data"))
+		binary, ok := firstRespondBinary(items, respondBinaryProperty(node.Parameters, options))
 		if !ok {
 			return webhookHTTPResponse{StatusCode: http.StatusNotFound, Headers: headers, Body: map[string]any{"error": "binary property not found"}}
 		}
@@ -436,7 +443,7 @@ func webhookResponseFromRespondNode(node dataplane.Node, items []dataplane.Item)
 		}
 		return webhookHTTPResponse{StatusCode: statusCode, Headers: headers, BinaryBody: decodeBinaryData(binary.Data), ContentType: firstNonEmpty(contentType, binary.MimeType, "application/octet-stream")}
 	case "text":
-		return webhookHTTPResponse{StatusCode: statusCode, Headers: headers, Body: parameterText(node.Parameters, "responseBody"), ContentType: firstNonEmpty(contentType, "text/plain; charset=utf-8")}
+		return webhookHTTPResponse{StatusCode: statusCode, Headers: headers, Body: parameterText(node.Parameters, "responseBody"), ContentType: firstNonEmpty(contentType, "text/html; charset=utf-8")}
 	case "json":
 		var parsed any
 		raw := parameterText(node.Parameters, "responseBody")
@@ -448,6 +455,8 @@ func webhookResponseFromRespondNode(node dataplane.Node, items []dataplane.Item)
 			statusCode = http.StatusInternalServerError
 		}
 		return webhookHTTPResponse{StatusCode: statusCode, Headers: headers, Body: parsed, ContentType: firstNonEmpty(contentType, "application/json")}
+	case "jwt":
+		return webhookHTTPResponse{StatusCode: http.StatusNotImplemented, Headers: headers, Body: map[string]any{"error": "jwt response is not implemented yet"}, ContentType: firstNonEmpty(contentType, "application/json")}
 	case "nodata":
 		if statusCode == http.StatusOK {
 			statusCode = http.StatusNoContent
@@ -468,11 +477,44 @@ func webhookResponseFromRespondNode(node dataplane.Node, items []dataplane.Item)
 	}
 }
 
-func firstRespondBinary(items []dataplane.Item, property string) (dataplane.Binary, bool) {
-	if property == "" {
-		property = "data"
+func respondBinaryProperty(parameters map[string]any, options map[string]any) string {
+	if firstNonEmpty(parameterText(parameters, "responseDataSource"), parameterText(options, "responseDataSource")) == "set" {
+		return firstNonEmpty(parameterText(parameters, "inputFieldName"), parameterText(options, "inputFieldName"), "data")
 	}
+	return firstNonEmpty(parameterText(options, "binaryPropertyName"), parameterText(parameters, "binaryPropertyName"), "")
+}
+
+func nestedResponseField(path string, value any) map[string]any {
+	result := map[string]any{}
+	current := result
+	parts := strings.Split(path, ".")
+	for _, part := range parts[:len(parts)-1] {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		next := map[string]any{}
+		current[part] = next
+		current = next
+	}
+	key := strings.TrimSpace(parts[len(parts)-1])
+	if key == "" {
+		key = path
+	}
+	current[key] = value
+	return result
+}
+
+func firstRespondBinary(items []dataplane.Item, property string) (dataplane.Binary, bool) {
 	if len(items) == 0 || items[0].Binary == nil {
+		return dataplane.Binary{}, false
+	}
+	if property == "" {
+		for key, binary := range items[0].Binary {
+			if key != "" {
+				return binary, true
+			}
+		}
 		return dataplane.Binary{}, false
 	}
 	binary, ok := items[0].Binary[property]
