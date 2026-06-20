@@ -332,7 +332,7 @@ func mergeMaskedCredentialData(incoming map[string]any, existing map[string]any)
 	}
 	result := make(map[string]any, len(incoming))
 	for key, value := range incoming {
-		if text, ok := value.(string); ok && text == maskedCredentialValue() {
+		if text, ok := value.(string); ok && isMaskedCredentialValue(text) {
 			if existingValue, exists := existing[key]; exists {
 				result[key] = existingValue
 				continue
@@ -350,7 +350,11 @@ func mergeMaskedCredentialData(incoming map[string]any, existing map[string]any)
 }
 
 func maskedCredentialValue() string {
-	return "__n8n_MASKED_VALUE__"
+	return "__n8n_EMPTY_VALUE_7b1af746-3729-4c60-9b9b-e08eb29e58da"
+}
+
+func isMaskedCredentialValue(value string) bool {
+	return value == maskedCredentialValue() || value == "__n8n_MASKED_VALUE__"
 }
 
 func filterCredentialRows(rows []persistence.CredentialRow, credentialType string, search string) []persistence.CredentialRow {

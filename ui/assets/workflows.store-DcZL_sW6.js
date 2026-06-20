@@ -21382,7 +21382,13 @@ var useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 		return updatedWorkflow;
 	}
 	async function publishWorkflow(id, data) {
-		return await makeRestApiRequest(rootStore.restApiContext, "POST", `/workflows/${id}/activate`, data);
+		try {
+			return await makeRestApiRequest(rootStore.restApiContext, "POST", `/workflows/${id}/activate`, data);
+		} catch (error) {
+			const statusCode = error?.response?.status ?? error?.status;
+			if (statusCode === 404) return await makeRestApiRequest(rootStore.restApiContext, "PATCH", `/workflows/${id}/activate`, data);
+			throw error;
+		}
 	}
 	async function deactivateWorkflow(id, expectedChecksum) {
 		const updatedWorkflow = await makeRestApiRequest(rootStore.restApiContext, "POST", `/workflows/${id}/deactivate`, { expectedChecksum });
