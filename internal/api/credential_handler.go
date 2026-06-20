@@ -46,7 +46,7 @@ func (s *Server) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 	rows = filterCredentialRows(rows, r.URL.Query().Get("type"), firstNonEmpty(r.URL.Query().Get("search"), r.URL.Query().Get("name")))
 	result := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		result = append(result, credentialMeta(row))
+		result = append(result, s.credentialMeta(r, row))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": result})
 }
@@ -66,7 +66,7 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	result := credentialMeta(*row)
+	result := s.credentialMeta(r, *row)
 	result["data"] = maskSensitive(data)
 	writeJSON(w, http.StatusOK, map[string]any{"data": result})
 }
@@ -151,7 +151,7 @@ func (s *Server) handleSaveCredential(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	result := credentialMeta(*row)
+	result := s.credentialMeta(r, *row)
 	result["data"] = maskSensitive(payload.Data)
 	writeJSON(w, http.StatusOK, map[string]any{"data": result})
 }
@@ -242,13 +242,32 @@ func (s *Server) handleCredentialType(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": credential})
 }
 
-func credentialMeta(row persistence.CredentialRow) map[string]any {
+func (s *Server) credentialMeta(r *http.Request, row persistence.CredentialRow) map[string]any {
 	return map[string]any{
-		"id":        row.ID,
-		"name":      row.Name,
-		"type":      row.Type,
-		"createdAt": row.CreatedAt,
-		"updatedAt": row.UpdatedAt,
+		"id":                 row.ID,
+		"name":               row.Name,
+		"type":               row.Type,
+		"createdAt":          row.CreatedAt,
+		"updatedAt":          row.UpdatedAt,
+		"scopes":             frontendCredentialScopes(),
+		"homeProject":        projectListItem(s.personalProject(r)),
+		"sharedWithProjects": []map[string]any{},
+		"isManaged":          false,
+		"isGlobal":           false,
+	}
+}
+
+func frontendCredentialScopes() []string {
+	return []string{
+		"credential:create",
+		"credential:read",
+		"credential:update",
+		"credential:delete",
+		"credential:list",
+		"credential:move",
+		"credential:share",
+		"credential:unshare",
+		"credential:shareGlobally",
 	}
 }
 

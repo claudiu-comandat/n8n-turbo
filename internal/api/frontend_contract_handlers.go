@@ -253,7 +253,7 @@ func (s *Server) handleCredentialsForWorkflow(w http.ResponseWriter, r *http.Req
 		if err == nil {
 			rows = make([]map[string]any, 0, len(credentials))
 			for _, row := range credentials {
-				rows = append(rows, credentialMeta(row))
+				rows = append(rows, s.credentialMeta(r, row))
 			}
 		}
 	}
