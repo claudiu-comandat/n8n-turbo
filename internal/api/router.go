@@ -250,6 +250,7 @@ func NewServer(
 		r.Post("/rest/credentials", server.handleSaveCredential)
 		r.Post("/rest/credentials/test", server.handleTestCredential)
 		r.Get("/rest/credentials/{id}", server.handleGetCredential)
+		r.Patch("/rest/credentials/{id}", server.handleSaveCredential)
 		r.Put("/rest/credentials/{id}", server.handleSaveCredential)
 		r.Delete("/rest/credentials/{id}", server.handleDeleteCredential)
 		r.Post("/rest/credentials/{id}/test", server.handleTestCredential)
