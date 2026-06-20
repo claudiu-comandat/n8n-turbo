@@ -10824,7 +10824,13 @@ async function disconnectMyConnection(context, id) {
 	await makeRestApiRequest(context, "DELETE", `/credentials/${id}/my-connection`);
 }
 async function updateCredential(context, id, data) {
-	return await makeRestApiRequest(context, "PATCH", `/credentials/${id}`, data);
+	try {
+		return await makeRestApiRequest(context, "PATCH", `/credentials/${id}`, data);
+	} catch (error) {
+		const statusCode = error?.response?.status ?? error?.status;
+		if (statusCode === 404) return await makeRestApiRequest(context, "PUT", `/credentials/${id}`, data);
+		throw error;
+	}
 }
 async function getCredentialData(context, id) {
 	return await makeRestApiRequest(context, "GET", `/credentials/${id}`, { includeData: true });

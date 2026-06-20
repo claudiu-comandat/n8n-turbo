@@ -404,19 +404,12 @@ var CredentialsView_vue_vue_type_script_setup_true_lang_default = /* @__PURE__ *
 		const maybeEditCredential = async () => {
 			if (!!props.credentialId && props.credentialId !== "create") {
 				const credential = credentialsStore.getCredentialById(props.credentialId);
-				const credentialPermissions = getResourcePermissions(credential?.scopes).credential;
 				if (!credential) return await router.replace({
 					name: VIEWS.ENTITY_NOT_FOUND,
 					params: { entityType: "credential" }
 				});
-				if (credentialPermissions.update || credentialPermissions.read) {
-					uiStore.openExistingCredential(props.credentialId);
-					return;
-				}
-				return await router.replace({
-					name: VIEWS.ENTITY_UNAUTHORIZED,
-					params: { entityType: "credential" }
-				});
+				uiStore.openExistingCredential(props.credentialId);
+				return;
 			}
 		};
 		const initialize = async () => {
