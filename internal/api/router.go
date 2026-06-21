@@ -167,6 +167,7 @@ func NewServer(
 	router.Use(compression)
 	router.Use(server.rateLimit)
 	router.Get("/healthz", server.handleHealthz)
+	router.Get("/rest/n8n-turbo/version", server.handleTurboVersion)
 	router.Get("/metrics", server.handleMetrics)
 	router.With(auth.OptionalMiddleware(authService, cfg.Auth)).Get("/rest/login", server.handleCurrentLogin)
 	router.Post("/rest/login", server.handleLogin)
@@ -311,6 +312,19 @@ func authServiceBootstrap(service *auth.Service) error {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleTurboVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"build":                firstNonEmpty(os.Getenv("N8N_TURBO_BUILD"), "dev"),
+			"image":                firstNonEmpty(os.Getenv("N8N_TURBO_IMAGE"), ""),
+			"credentialMaskMarker": maskedCredentialValue(),
+			"publishFallback":      true,
+			"assetCache":           "no-store",
+		},
+	})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

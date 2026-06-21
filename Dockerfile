@@ -12,6 +12,9 @@ ARG BUILD_DATE=unknown
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" -o /out/n8n-turbo ./cmd/n8n-turbo
 
 FROM alpine:3.22 AS runtime
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
 
 RUN apk add --no-cache ca-certificates tzdata curl go python3 poppler-utils ghostscript imagemagick && addgroup -g 1000 n8n && adduser -u 1000 -G n8n -s /bin/sh -D n8n
 WORKDIR /app
@@ -38,5 +41,8 @@ ENV N8N_EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
 ENV N8N_EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS=true
 ENV N8N_EXECUTIONS_DATA_SAVE_ON_PROGRESS=false
 ENV N8N_CONCURRENCY_PRODUCTION_LIMIT=0
+ENV N8N_TURBO_BUILD=${COMMIT}
+ENV N8N_TURBO_VERSION=${VERSION}
+ENV N8N_TURBO_BUILD_DATE=${BUILD_DATE}
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 CMD curl -fsS http://127.0.0.1:5678/healthz || exit 1
 ENTRYPOINT ["/app/n8n-turbo"]
