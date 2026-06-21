@@ -42,21 +42,23 @@ type SettingsStore interface {
 }
 
 type WorkflowRow struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Active      bool            `json:"active"`
-	Nodes       json.RawMessage `json:"nodes"`
-	Connections json.RawMessage `json:"connections"`
-	Settings    json.RawMessage `json:"settings"`
-	StaticData  json.RawMessage `json:"staticData"`
-	PinData     json.RawMessage `json:"pinData"`
-	VersionID   string          `json:"versionId"`
-	Checksum    string          `json:"checksum,omitempty"`
-	Meta        json.RawMessage `json:"meta"`
-	Scopes      []string        `json:"scopes,omitempty"`
-	OwnerID     string          `json:"-"`
-	CreatedAt   time.Time       `json:"createdAt"`
-	UpdatedAt   time.Time       `json:"updatedAt"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	Active          bool            `json:"active"`
+	Nodes           json.RawMessage `json:"nodes"`
+	Connections     json.RawMessage `json:"connections"`
+	Settings        json.RawMessage `json:"settings"`
+	StaticData      json.RawMessage `json:"staticData"`
+	PinData         json.RawMessage `json:"pinData"`
+	VersionID       string          `json:"versionId"`
+	ActiveVersionID *string         `json:"activeVersionId"`
+	ActiveVersion   map[string]any  `json:"activeVersion"`
+	Checksum        string          `json:"checksum,omitempty"`
+	Meta            json.RawMessage `json:"meta"`
+	Scopes          []string        `json:"scopes,omitempty"`
+	OwnerID         string          `json:"-"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
 }
 
 type WorkflowStore interface {

@@ -135,13 +135,26 @@ func (s *Server) handleWorkflowExists(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSaveWorkflow(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid workflow body")
+		return
+	}
 	var workflow dataplane.Workflow
-	if err := json.NewDecoder(r.Body).Decode(&workflow); err != nil {
+	if err := json.Unmarshal(body, &workflow); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid workflow body")
 		return
 	}
 	if id := chi.URLParam(r, "id"); id != "" {
 		workflow.ID = id
+	}
+	if workflow.ID != "" && !jsonObjectHasKey(body, "active") {
+		if existing, err := s.workflowStore.GetByID(r.Context(), workflow.ID); err == nil {
+			workflow.Active = existing.Active
+		} else if err != persistence.ErrNotFound {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if workflow.Name == "" {
 		workflow.Name = "My workflow"
@@ -684,6 +697,9 @@ func (s *Server) decorateWorkflowForFrontend(r *http.Request, workflow *dataplan
 	if workflow.Active && workflow.VersionID != "" {
 		setWorkflowRaw(workflow, "activeVersionId", workflow.VersionID)
 		setWorkflowRaw(workflow, "activeVersion", workflowActiveVersion(*workflow))
+	} else {
+		setWorkflowRaw(workflow, "activeVersionId", nil)
+		setWorkflowRaw(workflow, "activeVersion", nil)
 	}
 }
 
@@ -753,6 +769,21 @@ func (s *Server) decorateWorkflowRowsForFrontend(rows []persistence.WorkflowRow)
 	scopes := frontendWorkflowScopes()
 	for index := range rows {
 		rows[index].Scopes = scopes
+		rows[index].Checksum = rows[index].VersionID
+		if rows[index].Active && strings.TrimSpace(rows[index].VersionID) != "" {
+			versionID := rows[index].VersionID
+			rows[index].ActiveVersionID = &versionID
+			rows[index].ActiveVersion = workflowActiveVersion(dataplane.Workflow{
+				ID:        rows[index].ID,
+				Name:      rows[index].Name,
+				VersionID: rows[index].VersionID,
+				CreatedAt: &rows[index].CreatedAt,
+				UpdatedAt: &rows[index].UpdatedAt,
+			})
+		} else {
+			rows[index].ActiveVersionID = nil
+			rows[index].ActiveVersion = nil
+		}
 	}
 }
 
@@ -768,9 +799,19 @@ func frontendWorkflowScopes() []string {
 		"workflow:move",
 		"workflow:share",
 		"workflow:unshare",
+		"workflow:unpublish",
 		"workflow:activate",
 		"workflow:deactivate",
 	}
+}
+
+func jsonObjectHasKey(data []byte, key string) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	_, ok := raw[key]
+	return ok
 }
 
 func setWorkflowRaw(workflow *dataplane.Workflow, key string, value any) {
