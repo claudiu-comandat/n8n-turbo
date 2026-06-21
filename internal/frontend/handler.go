@@ -147,6 +147,10 @@ func (h *Handler) servesTransformedAsset(w http.ResponseWriter, path string) boo
 }
 
 func (h *Handler) setCacheHeaders(w http.ResponseWriter, path string) {
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	return
 	if h.config.DevMode {
 		w.Header().Set("Cache-Control", "no-cache")
 		return
@@ -188,6 +192,20 @@ func (h *Handler) replacePlaceholders(content string) string {
 }
 
 func (h *Handler) applyTurboFrontendCompatibility(content string) string {
+	const publishWorkflowOriginal = "async function publishWorkflow(id, data) {\n" +
+		"\t\treturn await makeRestApiRequest(rootStore.restApiContext, \"POST\", `/workflows/${id}/activate`, data);\n" +
+		"\t}"
+	const publishWorkflowFallback = "async function publishWorkflow(id, data) {\n" +
+		"\t\ttry {\n" +
+		"\t\t\treturn await makeRestApiRequest(rootStore.restApiContext, \"POST\", `/workflows/${id}/activate`, data);\n" +
+		"\t\t} catch (error) {\n" +
+		"\t\t\tconst statusCode = error?.response?.status ?? error?.status;\n" +
+		"\t\t\tif (statusCode === 404) return await makeRestApiRequest(rootStore.restApiContext, \"PATCH\", `/workflows/${id}/activate`, data);\n" +
+		"\t\t\tthrow error;\n" +
+		"\t\t}\n" +
+		"\t}"
+	content = strings.Replace(content, publishWorkflowOriginal, publishWorkflowFallback, 1)
+
 	const repositionImportedWorkflow = `workflowHelpers.updateNodePositions(workflowData, getNewNodePosition(workflowDocumentStore.value.allNodes, lastClickPosition.value, {
 				...workflowData.nodes && workflowData.nodes.length > 1 ? { size: getNodesGroupSize(workflowData.nodes) } : {},
 				viewport
