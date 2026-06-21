@@ -13,6 +13,7 @@ import (
 	"github.com/n8n-io/n8n-turbo/internal/auth"
 	"github.com/n8n-io/n8n-turbo/internal/descriptor"
 	"github.com/n8n-io/n8n-turbo/internal/metadata"
+	"github.com/n8n-io/n8n-turbo/internal/nodes"
 	"github.com/n8n-io/n8n-turbo/internal/persistence"
 )
 
@@ -383,6 +384,12 @@ func (s *Server) runCredentialTest(ctx context.Context, credentialType string, d
 	}
 	if err := validateCredentialData(credential, data); err != nil {
 		return credentialTestResult{Success: false, Status: "Error", Message: err.Error()}
+	}
+	if credentialType == "postgres" {
+		if err := nodes.PostgresTestConnection(ctx, data); err != nil {
+			return credentialTestResult{Success: false, Status: "Error", Message: err.Error()}
+		}
+		return credentialTestResult{Success: true, Status: "OK", Message: "Connection tested successfully"}
 	}
 	desc, operation, ok := credentialTestOperation(credentialType)
 	if !ok {
