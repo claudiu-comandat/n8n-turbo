@@ -346,6 +346,12 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pinData := request.effectivePinData(workflow)
+	onNodeAfter := s.pushNodeAfter
+	if pushRef := strings.TrimSpace(r.Header.Get("push-ref")); pushRef != "" {
+		onNodeAfter = func(event engine.NodeAfterEvent) {
+			s.pushNodeAfterToSession(pushRef, event)
+		}
+	}
 	dispatchResult := s.dispatchWorkflowSync(r.Context(), executionDispatchRequest{
 		ExecutionID: execution.ID,
 		Workflow:    workflow,
@@ -360,7 +366,7 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 			RunData:     request.RunData,
 			PinData:     pinData,
 			OnStarted:   s.pushExecutionStarted,
-			OnNodeAfter: s.pushNodeAfter,
+			OnNodeAfter: onNodeAfter,
 			OnFinished:  s.pushExecutionFinished,
 		},
 		StartData: request.startData(destination),
@@ -380,7 +386,7 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": finished})
+	writeJSON(w, http.StatusOK, map[string]any{"data": executionResponse(*finished)})
 }
 
 func (s *Server) handleListExecutions(w http.ResponseWriter, r *http.Request) {
@@ -474,11 +480,17 @@ func (s *Server) handleRetryExecution(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if s.evaluator == nil || s.activeExecutions == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"data": retry})
+		writeJSON(w, http.StatusOK, map[string]any{"data": executionResponse(*retry)})
 		return
 	}
 	variables, _ := s.resolvedVariables(r)
 	secrets, _ := s.resolvedSecretsRequest(r)
+	onNodeAfter := s.pushNodeAfter
+	if pushRef := strings.TrimSpace(r.Header.Get("push-ref")); pushRef != "" {
+		onNodeAfter = func(event engine.NodeAfterEvent) {
+			s.pushNodeAfterToSession(pushRef, event)
+		}
+	}
 	dispatchResult := s.dispatchWorkflowSync(r.Context(), executionDispatchRequest{
 		ExecutionID: retry.ID,
 		Workflow:    workflow,
@@ -489,7 +501,7 @@ func (s *Server) handleRetryExecution(w http.ResponseWriter, r *http.Request) {
 			BinaryStore: s.binaryStore,
 			Credentials: s.resolveNodeCredentials,
 			OnStarted:   s.pushExecutionStarted,
-			OnNodeAfter: s.pushNodeAfter,
+			OnNodeAfter: onNodeAfter,
 			OnFinished:  s.pushExecutionFinished,
 		},
 		StartData: map[string]any{"retryOf": previous.ID},
@@ -508,7 +520,7 @@ func (s *Server) handleRetryExecution(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": finished})
+	writeJSON(w, http.StatusOK, map[string]any{"data": executionResponse(*finished)})
 }
 
 func (s *Server) handleActiveExecutions(w http.ResponseWriter, r *http.Request) {

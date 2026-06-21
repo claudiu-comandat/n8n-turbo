@@ -19,6 +19,18 @@ func (s *Server) pushNodeAfter(event engine.NodeAfterEvent) {
 	s.pushHub.BroadcastToExecution(event.ExecutionID, push.NodeExecuteAfter(event.ExecutionID, event.WorkflowID, event.NodeName, event.Status, event.TaskData))
 }
 
+func (s *Server) pushNodeAfterToSession(sessionID string, event engine.NodeAfterEvent) {
+	if s.pushHub == nil {
+		return
+	}
+	message := push.NodeExecuteAfter(event.ExecutionID, event.WorkflowID, event.NodeName, event.Status, event.TaskData)
+	if sessionID == "" {
+		s.pushHub.BroadcastToExecution(event.ExecutionID, message)
+		return
+	}
+	s.pushHub.BroadcastToSession(sessionID, message)
+}
+
 func (s *Server) pushExecutionFinished(event engine.ExecutionFinishedEvent) {
 	if s.pushHub == nil {
 		return
