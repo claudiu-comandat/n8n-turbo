@@ -84,6 +84,13 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"data": workflow})
 		return
 	}
+	if id == "demo" {
+		workflow := s.newWorkflowPlaceholder(r)
+		workflow.ID = "demo"
+		workflow.Name = "Demo workflow"
+		writeJSON(w, http.StatusOK, map[string]any{"data": workflow})
+		return
+	}
 	row, err := s.workflowStore.GetByID(r.Context(), id)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -104,6 +111,15 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWorkflowExists(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if id == "demo" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"exists": true,
+			"data": map[string]any{
+				"exists": true,
+			},
+		})
+		return
+	}
 	_, err := s.workflowStore.GetByID(r.Context(), id)
 	exists := err == nil
 	if err != nil && err != persistence.ErrNotFound {
@@ -450,6 +466,59 @@ func (s *Server) handleDeleteExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"deleted": true, "id": id}})
+}
+
+func (s *Server) handleDeleteExecutions(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		IDs          []string `json:"ids"`
+		DeleteBefore string   `json:"deleteBefore"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid execution delete body")
+		return
+	}
+	deletedIDs := make([]string, 0, len(payload.IDs))
+	deletedCount := 0
+	for _, id := range payload.IDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if s.activeExecutions != nil {
+			_ = s.activeExecutions.Stop(id)
+		}
+		if err := s.executionStore.Delete(r.Context(), id); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		deletedIDs = append(deletedIDs, id)
+		deletedCount++
+	}
+	if strings.TrimSpace(payload.DeleteBefore) != "" {
+		deleteBefore, err := time.Parse(time.RFC3339Nano, payload.DeleteBefore)
+		if err != nil {
+			if parsed, fallbackErr := time.Parse(time.RFC3339, payload.DeleteBefore); fallbackErr == nil {
+				deleteBefore = parsed
+			} else {
+				writeError(w, http.StatusBadRequest, "deleteBefore must be an RFC3339 timestamp")
+				return
+			}
+		}
+		count, err := s.executionStore.DeleteOlderThan(r.Context(), deleteBefore)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		deletedCount += count
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"deleted": deletedCount,
+			"ids":     deletedIDs,
+		},
+		"deleted": deletedCount,
+		"ids":     deletedIDs,
+	})
 }
 
 func (s *Server) handleRetryExecution(w http.ResponseWriter, r *http.Request) {

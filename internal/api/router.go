@@ -236,6 +236,7 @@ func NewServer(
 		r.Post("/rest/workflows/{id}/run", server.handleRunWorkflow)
 		r.Get("/rest/executions", server.handleListExecutions)
 		r.Get("/rest/executions/active", server.handleActiveExecutions)
+		r.Post("/rest/executions/delete", server.handleDeleteExecutions)
 		r.Get("/rest/active-workflows", server.handleLegacyActiveWorkflows)
 		r.Post("/rest/webhooks/find", server.handleFindWebhook)
 		r.Get("/rest/executions/{id}", server.handleGetExecution)
