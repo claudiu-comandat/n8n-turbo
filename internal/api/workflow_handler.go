@@ -886,6 +886,7 @@ func executionResponse(execution persistence.ExecutionRow) map[string]any {
 	finished := execution.Status != "new" && execution.Status != "running" && execution.Status != "waiting"
 	response := map[string]any{
 		"id":             execution.ID,
+		"executionId":    execution.ID,
 		"workflowId":     execution.WorkflowID,
 		"status":         execution.Status,
 		"mode":           execution.Mode,
