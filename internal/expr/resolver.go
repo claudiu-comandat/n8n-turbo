@@ -114,7 +114,7 @@ func (r *Resolver) evaluate(code string, exprCtx Context) (any, error) {
 }
 
 func (r *Resolver) release(vm *goja.Runtime) {
-	for _, name := range []string{"$json", "$binary", "$vars", "$secrets", "$now", "$today", "$itemIndex", "$runIndex", "$workflow", "$execution", "$input", "$node", "$json_stringify", "$response", "$pageCount", "console", "DateTime", "N8nDateTime", "__n8nNow"} {
+	for _, name := range []string{"$json", "$binary", "$vars", "$secrets", "$now", "$today", "$itemIndex", "$runIndex", "$workflow", "$execution", "$input", "$node", "$", "$items", "$json_stringify", "$response", "$pageCount", "console", "DateTime", "N8nDateTime", "__n8nNow"} {
 		_ = vm.Set(name, goja.Undefined())
 	}
 	r.pool.Put(vm)
@@ -156,6 +156,29 @@ func (r *Resolver) inject(vm *goja.Runtime, exprCtx Context) error {
 		},
 	})
 	_ = vm.Set("$node", nodeData(exprCtx.RunData))
+	_ = vm.Set("$items", func(nodeName string) []map[string]any {
+		return runDataItems(exprCtx.RunData, nodeName)
+	})
+	_ = vm.Set("$", func(nodeName string) map[string]any {
+		items := runDataItems(exprCtx.RunData, nodeName)
+		return map[string]any{
+			"all": func() []map[string]any {
+				return items
+			},
+			"first": func() any {
+				if len(items) == 0 {
+					return nil
+				}
+				return items[0]
+			},
+			"last": func() any {
+				if len(items) == 0 {
+					return nil
+				}
+				return items[len(items)-1]
+			},
+		}
+	})
 	for key, value := range exprCtx.Extra {
 		if strings.HasPrefix(key, "$") {
 			_ = vm.Set(key, value)
@@ -285,6 +308,22 @@ globalThis.DateTime = {
 globalThis.$now = globalThis.DateTime.now();
 globalThis.$today = globalThis.DateTime.now().startOf('day');
 `
+
+func runDataItems(runData map[string][]dataplane.TaskData, nodeName string) []map[string]any {
+	tasks := runData[nodeName]
+	if len(tasks) == 0 {
+		return nil
+	}
+	main := tasks[len(tasks)-1].Data["main"]
+	if len(main) == 0 {
+		return nil
+	}
+	result := make([]map[string]any, 0, len(main[0]))
+	for _, item := range main[0] {
+		result = append(result, map[string]any{"json": item.JSON, "binary": item.Binary, "pairedItem": item.PairedItem})
+	}
+	return result
+}
 
 func nodeData(runData map[string][]dataplane.TaskData) map[string]any {
 	result := make(map[string]any, len(runData))
