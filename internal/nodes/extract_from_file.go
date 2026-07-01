@@ -323,8 +323,12 @@ func extractedRowItem(sourceItem dataplane.Item, itemIndex int, row map[string]a
 func newExtractParams(params map[string]any) extractParams {
 	options := mergeObject(params["options"])
 	keepSource := stringParam(options, "keepSource")
+	dropSource := strings.EqualFold(keepSource, "none")
+	if dropSource {
+		keepSource = ""
+	}
 	operation := strings.TrimSpace(stringParam(params, "operation", "fileFormat"))
-	if keepSource == "" && isExtractMoveToOperation(operation) {
+	if keepSource == "" && !dropSource && isExtractMoveToOperation(operation) {
 		keepSource = "json"
 	}
 	parsed := extractParams{

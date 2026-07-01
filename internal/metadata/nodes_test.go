@@ -184,6 +184,7 @@ func metadataCompatNode(name string) bool {
 	switch name {
 	case "@n8n/n8n-nodes-langchain.agent",
 		"n8n-nodes-base.code",
+		"n8n-nodes-base.extractFromFile",
 		"n8n-nodes-base.filter",
 		"n8n-nodes-base.n8n",
 		"n8n-nodes-base.webhook":
@@ -261,6 +262,25 @@ func TestCodeNodeExposesGoLanguageForTurboRunner(t *testing.T) {
 	if testRawProperty(node.Raw, "goCode", "runOnceForEachItem") == nil {
 		t.Fatal("Code node should expose Go editor in per-item mode")
 	}
+}
+
+func TestExtractFromFileOptionsExposeKeepSource(t *testing.T) {
+	t.Parallel()
+
+	node, ok := NodeTypeByName("n8n-nodes-base.extractFromFile", nil)
+	if !ok {
+		t.Fatal("expected Extract From File node metadata")
+	}
+	for _, option := range collectionOptions(node.Raw, "options") {
+		if option["name"] != "keepSource" {
+			continue
+		}
+		if !propertyHasOption(option, "json") || !propertyHasOption(option, "binary") || !propertyHasOption(option, "both") || !propertyHasOption(option, "none") {
+			t.Fatalf("Keep Source should expose json, binary, both, and none options: %#v", option["options"])
+		}
+		return
+	}
+	t.Fatal("Extract From File options should expose Keep Source")
 }
 
 func TestFilterExposesV1ConditionsForMigratedWorkflows(t *testing.T) {

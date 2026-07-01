@@ -78,6 +78,21 @@ func applyNodeMetadataCompat(raw map[string]any, name string) {
 			"description": "Comma-separated list of URLs allowed for cross-origin non-preflight requests. Use * (default) to allow all origins.",
 		})
 	}
+	if name == "n8n-nodes-base.extractFromFile" {
+		ensureCollectionOption(raw, "options", map[string]any{
+			"displayName": "Keep Source",
+			"name":        "keepSource",
+			"type":        "options",
+			"default":     "json",
+			"description": "Whether to keep source data from the incoming item on extracted rows.",
+			"options": []any{
+				map[string]any{"name": "JSON", "value": "json", "description": "Keep incoming JSON fields and remove the processed binary field"},
+				map[string]any{"name": "Binary", "value": "binary", "description": "Keep only the source binary data"},
+				map[string]any{"name": "Both", "value": "both", "description": "Keep both incoming JSON fields and source binary data"},
+				map[string]any{"name": "None", "value": "none", "description": "Keep only extracted data"},
+			},
+		})
+	}
 	if name == "n8n-nodes-base.code" {
 		ensureCodeGoSupport(raw)
 	}

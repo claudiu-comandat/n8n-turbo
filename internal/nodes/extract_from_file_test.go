@@ -75,6 +75,29 @@ func TestExtractFromFileTextCanKeepSourceBinaryLikeOfficial(t *testing.T) {
 	}
 }
 
+func TestExtractFromFileTextCanDropSourceData(t *testing.T) {
+	t.Parallel()
+
+	out, err := (ExtractFromFile{}).Execute(context.Background(), testInput(map[string]any{
+		"operation":          "text",
+		"binaryPropertyName": "data",
+		"destinationKey":     "text",
+		"options":            map[string]any{"keepSource": "none"},
+	}, []dataplane.Item{{JSON: map[string]any{"id": "drop"}, Binary: map[string]dataplane.Binary{
+		"data": {Data: base64.StdEncoding.EncodeToString([]byte("hello")), FileName: "hello.txt", FileExtension: "txt", MimeType: "text/plain"},
+	}}}))
+	if err != nil {
+		t.Fatalf("extract text execute: %v", err)
+	}
+	got := out[0][0]
+	if _, ok := got.JSON["id"]; ok || got.JSON["text"] != "hello" {
+		t.Fatalf("keepSource=none should keep only extracted json, got %#v", got.JSON)
+	}
+	if got.Binary != nil {
+		t.Fatalf("keepSource=none should drop source binary, got %#v", got.Binary)
+	}
+}
+
 func TestExtractFromFilePDFUsesPopplerWhenAvailable(t *testing.T) {
 	t.Parallel()
 
