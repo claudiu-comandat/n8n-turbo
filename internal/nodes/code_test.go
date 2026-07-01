@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 	"github.com/n8n-io/n8n-turbo/internal/engine"
@@ -219,5 +220,13 @@ return [{ json: {
 	}
 	if out[0][0].JSON["hasConnect"] != true || out[0][0].JSON["first"] != "ok" {
 		t.Fatalf("unexpected playwright-extra output: %#v", out[0][0].JSON)
+	}
+}
+
+func TestCodeDefaultTimeoutIsNinetyMinutes(t *testing.T) {
+	t.Parallel()
+
+	if got := codeTimeout(nil); got != 90*time.Minute {
+		t.Fatalf("default code timeout = %s, want 90m", got)
 	}
 }

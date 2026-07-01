@@ -25,6 +25,8 @@ import (
 
 type Code struct{}
 
+const codeDefaultTimeout = 90 * time.Minute
+
 func (Code) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
 	language := strings.ToLower(stringParam(in.Node.Parameters, "language"))
 	switch language {
@@ -1490,9 +1492,9 @@ func codeTimeout(params map[string]any) time.Duration {
 	if milliseconds := intParam(params, "timeoutMilliseconds", 0); milliseconds > 0 {
 		return time.Duration(milliseconds) * time.Millisecond
 	}
-	timeout := time.Duration(intParam(params, "timeoutSeconds", 10)) * time.Second
+	timeout := time.Duration(intParam(params, "timeoutSeconds", int(codeDefaultTimeout/time.Second))) * time.Second
 	if timeout <= 0 {
-		timeout = 10 * time.Second
+		timeout = codeDefaultTimeout
 	}
 	return timeout
 }
