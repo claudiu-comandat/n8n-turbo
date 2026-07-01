@@ -65,8 +65,11 @@ func TestSQLExecuteQueryRunsMultipleStatementsWithQueryReplacement(t *testing.T)
 	if err != nil {
 		t.Fatalf("execute multi statement query: %v", err)
 	}
-	if got := len(out[0]); got != 2 {
-		t.Fatalf("expected one result per statement, got %d", got)
+	if got := len(out[0]); got != 1 {
+		t.Fatalf("expected one success result, got %d", got)
+	}
+	if got := out[0][0].JSON["success"]; got != true {
+		t.Fatalf("unexpected multi statement output: %#v", out[0][0].JSON)
 	}
 
 	rows, err := sqlQueryRows(context.Background(), db, `SELECT id FROM "invoice-1"`)
@@ -75,6 +78,37 @@ func TestSQLExecuteQueryRunsMultipleStatementsWithQueryReplacement(t *testing.T)
 	}
 	if got := rows[0].JSON["id"]; got != "abc" {
 		t.Fatalf("unexpected inserted row: %#v", rows[0].JSON)
+	}
+}
+
+func TestSQLExecuteQueryDefaultsToSingleQueryBatching(t *testing.T) {
+	t.Parallel()
+
+	db := openSQLiteTestDB(t)
+	if _, err := db.ExecContext(context.Background(), `CREATE TABLE items (name TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	_, err := executeSQLNode(context.Background(), db, testInput(map[string]any{
+		"operation": "executeQuery",
+		"query":     `INSERT INTO items (name) VALUES (?)`,
+		"options": map[string]any{
+			"queryReplacement": "{{ $json.name }}",
+		},
+	}, []dataplane.Item{
+		{JSON: map[string]any{"name": "first"}},
+		{JSON: map[string]any{"name": "second"}},
+	}), sqliteTestDialect)
+	if err != nil {
+		t.Fatalf("execute query: %v", err)
+	}
+
+	rows, err := sqlQueryRows(context.Background(), db, `SELECT name FROM items`)
+	if err != nil {
+		t.Fatalf("select rows: %v", err)
+	}
+	if len(rows) != 1 || rows[0].JSON["name"] != "first" {
+		t.Fatalf("default batching should execute only first item, got %#v", rows)
 	}
 }
 

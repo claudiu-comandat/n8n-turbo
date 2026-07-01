@@ -56,7 +56,7 @@ func sqlExecuteQuery(ctx context.Context, db *sql.DB, in engine.ExecuteInput, di
 	if len(items) == 0 {
 		items = []dataplane.Item{{JSON: map[string]any{}}}
 	}
-	queryBatching := strings.ToLower(firstNonEmptyNode(stringParam(sqlOptions(in.Node.Parameters), "queryBatching"), stringParam(in.Node.Parameters, "queryBatching"), "independently"))
+	queryBatching := strings.ToLower(firstNonEmptyNode(stringParam(sqlOptions(in.Node.Parameters), "queryBatching"), stringParam(in.Node.Parameters, "queryBatching"), "single"))
 	if queryBatching == "singlequery" || queryBatching == "single" {
 		items = items[:1]
 	}
@@ -93,6 +93,7 @@ func sqlExecuteQueryWithRunner(ctx context.Context, runner sqlRunner, in engine.
 		args := sqlArgsForQuery(in, items, index, query, dialect)
 		if statements := sqlStatements(query); len(statements) > 1 {
 			argOffset := 0
+			outputLength := len(output)
 			for _, statement := range statements {
 				statementArgs, usedArgs := sqlStatementArgs(statement, dialect, args, argOffset)
 				argOffset += usedArgs
@@ -108,7 +109,10 @@ func sqlExecuteQueryWithRunner(ctx context.Context, runner sqlRunner, in engine.
 				if err != nil {
 					return nil, err
 				}
-				output = append(output, sqlResultItem(result))
+				_ = result
+			}
+			if len(output) == outputLength {
+				output = append(output, dataplane.Item{JSON: map[string]any{"success": true}})
 			}
 			continue
 		}
