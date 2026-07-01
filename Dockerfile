@@ -2,10 +2,10 @@ FROM golang:1.25-alpine AS go-builder
 
 WORKDIR /src
 RUN apk add --no-cache ca-certificates git tzdata
-COPY n8n-turbo/go.mod n8n-turbo/go.sum ./
+COPY go.mod go.sum ./
 RUN go mod download
-COPY n8n-turbo/cmd ./cmd
-COPY n8n-turbo/internal ./internal
+COPY cmd ./cmd
+COPY internal ./internal
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
@@ -22,7 +22,7 @@ ARG LANGCHAIN_NODES_VERSION=2.16.1
 RUN apk add --no-cache ca-certificates tzdata curl go nodejs npm python3 poppler-utils ghostscript imagemagick && addgroup -g 1000 n8n && adduser -u 1000 -G n8n -s /bin/sh -D n8n
 WORKDIR /app
 COPY --from=go-builder /out/n8n-turbo /app/n8n-turbo
-COPY n8n-turbo/package.json n8n-turbo/package-lock.json /app/
+COPY package.json package-lock.json /app/
 RUN npm ci --omit=dev --ignore-scripts
 RUN mkdir -p /app/ui \
 	&& curl -fsSL "https://registry.npmjs.org/n8n-editor-ui/-/n8n-editor-ui-${EDITOR_UI_VERSION}.tgz" | tar -xz -C /tmp \
