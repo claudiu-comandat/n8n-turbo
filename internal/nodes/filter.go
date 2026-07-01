@@ -17,10 +17,14 @@ func (Filter) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Ou
 	}
 	items := firstInput(in.InputData)
 	result := make([]dataplane.Item, 0, len(items))
+	discarded := make([]dataplane.Item, 0)
 	for index, item := range items {
+		item = itemWithPairedIndex(item, index, false)
 		if conditionMatches(in, items, index, item, in.Node.Parameters) {
 			result = append(result, item)
+		} else {
+			discarded = append(discarded, item)
 		}
 	}
-	return dataplane.MainOutput(result), nil
+	return dataplane.Output{result, discarded}, nil
 }

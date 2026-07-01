@@ -23,6 +23,9 @@ func CredentialTypes() []CredentialType {
 		credential("googleOAuth2Api", "Google OAuth2 API", text("Client ID", "clientId", ""), secret("Client Secret", "clientSecret"), secret("Access Token", "accessToken"), secret("Refresh Token", "refreshToken")),
 		credential("googleSheetsOAuth2Api", "Google Sheets OAuth2 API", text("Client ID", "clientId", ""), secret("Client Secret", "clientSecret"), secret("Access Token", "accessToken"), secret("Refresh Token", "refreshToken")),
 		credential("googleApi", "Google Service Account API", text("Email", "email", ""), secret("Private Key", "privateKey")),
+		credential("googlePalmApi", "Google Gemini(PaLM) Api", text("Host", "host", "https://generativelanguage.googleapis.com"), secret("API Key", "apiKey")),
+		openAICompatibleCredential("deepSeekApi", "DeepSeek", "deepseek", "https://api.deepseek.com", "/models"),
+		openAICompatibleCredential("openRouterApi", "OpenRouter", "openrouter", "https://openrouter.ai/api/v1", "/key"),
 		credential("notionApi", "Notion API", secret("Internal Integration Token", "apiKey")),
 		credential("airtableApi", "Airtable API", secret("Access Token", "accessToken")),
 		credential("jiraSoftwareCloudApi", "Jira Software Cloud API", text("Email", "email", ""), secret("API Token", "apiToken"), text("Domain", "domain", "")),
@@ -30,6 +33,7 @@ func CredentialTypes() []CredentialType {
 		credential("hubspotPrivateAppApi", "HubSpot Private App", secret("Private App Token", "accessToken")),
 		credential("stripeApi", "Stripe API", secret("Secret Key", "secretKey")),
 		credential("openAiApi", "OpenAI API", secret("API Key", "apiKey"), text("Organization ID", "organizationId", ""), text("Base URL", "baseUrl", "https://api.openai.com/v1")),
+		n8nAPICredential(),
 		credential("telegramApi", "Telegram API", secret("Access Token", "accessToken")),
 		credential("discordBotApi", "Discord Bot API", secret("Bot Token", "botToken")),
 		credential("twilioApi", "Twilio API", text("Account SID", "accountSid", ""), secret("Auth Token", "authToken")),
@@ -74,6 +78,46 @@ func credential(name string, display string, props ...Property) CredentialType {
 func genericCredential(credential CredentialType) CredentialType {
 	credential.GenericAuth = true
 	return credential
+}
+
+func openAICompatibleCredential(name string, display string, docsSlug string, baseURL string, testPath string) CredentialType {
+	cred := credential(name, display, secret("API Key", "apiKey"), hiddenProp("URL", "url", baseURL))
+	cred.DocumentationURL = "https://docs.n8n.io/integrations/builtin/credentials/" + docsSlug
+	cred.Authenticate = map[string]any{
+		"type": "generic",
+		"properties": map[string]any{
+			"headers": map[string]string{
+				"Authorization": "=Bearer {{$credentials.apiKey}}",
+			},
+		},
+	}
+	cred.Test = map[string]any{
+		"request": map[string]any{
+			"baseURL": "={{ $credentials.url }}",
+			"url":     testPath,
+		},
+	}
+	return cred
+}
+
+func n8nAPICredential() CredentialType {
+	cred := credential("n8nApi", "n8n API", secret("API Key", "apiKey"), textPlaceholder("Base URL", "baseUrl", "", "https://<name>.app.n8n.cloud/api/v1"))
+	cred.DocumentationURL = "https://docs.n8n.io/api/authentication/"
+	cred.Authenticate = map[string]any{
+		"type": "generic",
+		"properties": map[string]any{
+			"headers": map[string]string{
+				"X-N8N-API-KEY": "={{ $credentials.apiKey }}",
+			},
+		},
+	}
+	cred.Test = map[string]any{
+		"request": map[string]any{
+			"baseURL": "={{ $credentials.baseUrl }}",
+			"url":     "/workflows?limit=5",
+		},
+	}
+	return cred
 }
 
 func enrichCredentialTypes(types []CredentialType) {

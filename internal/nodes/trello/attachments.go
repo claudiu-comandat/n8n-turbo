@@ -14,7 +14,7 @@ import (
 )
 
 func (n *Node) handleAttachment(ctx context.Context, cred Credential, operation string, params map[string]any, item dataplane.Item) ([]dataplane.Item, error) {
-	cardID := stringValue(params, "cardId")
+	cardID := stringValue(params, "cardId", "idCard")
 	if cardID == "" {
 		return nil, fmt.Errorf("cardId is required")
 	}
@@ -22,7 +22,7 @@ func (n *Node) handleAttachment(ctx context.Context, cred Credential, operation 
 	case "getAll", "list":
 		return itemsFromArray(n.doArray(ctx, cred, http.MethodGet, "/cards/"+cardID+"/attachments?fields=id,name,url,bytes,date,mimeType", nil))
 	case "get":
-		id := stringValue(params, "attachmentId")
+		id := stringValue(params, "attachmentId", "id")
 		if id == "" {
 			return nil, fmt.Errorf("attachmentId is required")
 		}
@@ -35,7 +35,7 @@ func (n *Node) handleAttachment(ctx context.Context, cred Credential, operation 
 		}
 		return single(n.uploadAttachmentBinary(ctx, cred, cardID, params, item))
 	case "delete":
-		id := stringValue(params, "attachmentId")
+		id := stringValue(params, "attachmentId", "id")
 		if id == "" {
 			return nil, fmt.Errorf("attachmentId is required")
 		}

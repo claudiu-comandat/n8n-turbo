@@ -39,7 +39,11 @@ func (n *Node) handleMember(ctx context.Context, cred Credential, operation stri
 	case "getAll", "list":
 		limit := intParam(params, "limit")
 		if limit <= 0 {
-			limit = 1000
+			if boolParam(params, "returnAll") {
+				limit = 100
+			} else {
+				limit = 1000
+			}
 		}
 		query := url.Values{}
 		query.Set("limit", fmt.Sprint(limit))
@@ -69,7 +73,31 @@ func (n *Node) handleMember(ctx context.Context, cred Credential, operation stri
 			return nil, fmt.Errorf("userId is required")
 		}
 		return single(n.doJSON(ctx, cred, http.MethodDelete, fmt.Sprintf("/guilds/%s/bans/%s", guildID, userID), nil))
+	case "roleAdd":
+		return single(n.updateMemberRoles(ctx, cred, guildID, params, http.MethodPut))
+	case "roleRemove":
+		return single(n.updateMemberRoles(ctx, cred, guildID, params, http.MethodDelete))
 	default:
 		return nil, fmt.Errorf("unknown member operation %s", operation)
 	}
+}
+
+func (n *Node) updateMemberRoles(ctx context.Context, cred Credential, guildID string, params map[string]any, method string) (map[string]any, error) {
+	userID := stringParam(params, "userId", "user_id")
+	if userID == "" {
+		return nil, fmt.Errorf("userId is required")
+	}
+	roles := stringSlice(params, "role")
+	if len(roles) == 0 {
+		roles = stringSlice(params, "roles")
+	}
+	if len(roles) == 0 {
+		return nil, fmt.Errorf("role is required")
+	}
+	for _, roleID := range roles {
+		if _, err := n.doJSON(ctx, cred, method, fmt.Sprintf("/guilds/%s/members/%s/roles/%s", guildID, userID, roleID), nil); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"success": true}, nil
 }

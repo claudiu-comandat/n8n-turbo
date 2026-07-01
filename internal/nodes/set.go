@@ -49,7 +49,7 @@ func setFields(in engine.ExecuteInput, items []dataplane.Item, itemIndex int, it
 	switch mode {
 	case "manual":
 		return setManualFields(in, items, itemIndex, item, params)
-	case "json":
+	case "json", "raw":
 		return setJSONFields(in, items, itemIndex, item, params)
 	default:
 		return dataplane.Item{}, fmt.Errorf("unknown set mode %q", mode)
@@ -57,9 +57,9 @@ func setFields(in engine.ExecuteInput, items []dataplane.Item, itemIndex int, it
 }
 
 func setManualFields(in engine.ExecuteInput, items []dataplane.Item, itemIndex int, item dataplane.Item, params map[string]any) (dataplane.Item, error) {
-	next := dataplane.Item{JSON: setBaseJSON(item, params), Binary: item.Binary, PairedItem: item.PairedItem, Error: item.Error}
+	next := dataplane.Item{JSON: setBaseJSON(item, params, in.Node.TypeVersion), Binary: setBaseBinary(item, params, in.Node.TypeVersion), PairedItem: &dataplane.PairedItem{Item: itemIndex}, Error: item.Error}
 	fields := collectSetFields(params)
-	dotNotation := boolParam(rawOptions(params), "dotNotation", boolParam(params, "dotNotation", false))
+	dotNotation := boolParam(rawOptions(params), "dotNotation", boolParam(params, "dotNotation", true))
 	ignoreConversion := boolParam(rawOptions(params), "ignoreConversionErrors", boolParam(params, "ignoreConversionErrors", false))
 	for _, field := range fields {
 		if field.Name == "" {
@@ -84,12 +84,9 @@ func setManualFields(in engine.ExecuteInput, items []dataplane.Item, itemIndex i
 }
 
 func setJSONFields(in engine.ExecuteInput, items []dataplane.Item, itemIndex int, item dataplane.Item, params map[string]any) (dataplane.Item, error) {
-	next := dataplane.Item{JSON: map[string]any{}, Binary: item.Binary, PairedItem: item.PairedItem, Error: item.Error}
+	next := dataplane.Item{JSON: setBaseJSON(item, params, in.Node.TypeVersion), Binary: setBaseBinary(item, params, in.Node.TypeVersion), PairedItem: &dataplane.PairedItem{Item: itemIndex}, Error: item.Error}
 	raw := firstNonNil(params["jsonOutput"], params["json"], params["value"])
 	if raw == nil || fmt.Sprint(raw) == "" {
-		if includeOtherSetFields(params) {
-			next.JSON = deepCopySetMap(item.JSON)
-		}
 		return next, nil
 	}
 	resolved := resolveValue(in, items, itemIndex, raw)
@@ -97,32 +94,98 @@ func setJSONFields(in engine.ExecuteInput, items []dataplane.Item, itemIndex int
 	if err != nil {
 		return dataplane.Item{}, err
 	}
-	if includeOtherSetFields(params) {
-		next.JSON = deepCopySetMap(item.JSON)
-		for key, value := range output {
-			next.JSON[key] = value
-		}
-	} else {
-		next.JSON = output
+	for key, value := range output {
+		next.JSON[key] = value
 	}
 	return next, nil
 }
 
-func setBaseJSON(item dataplane.Item, params map[string]any) map[string]any {
-	if includeOtherSetFields(params) {
+func setBaseJSON(item dataplane.Item, params map[string]any, nodeVersion float64) map[string]any {
+	dotNotation := boolParam(rawOptions(params), "dotNotation", boolParam(params, "dotNotation", true))
+	switch effectiveSetInclude(params, nodeVersion) {
+	case "none":
+		return map[string]any{}
+	case "selected":
+		return copySetFields(item.JSON, stringParam(params, "includeFields"), dotNotation)
+	case "except":
+		next := deepCopySetMap(item.JSON)
+		for _, field := range splitSetFieldList(stringParam(params, "excludeFields")) {
+			if dotNotation {
+				unsetNestedSetValue(next, field)
+			} else {
+				delete(next, field)
+			}
+		}
+		return next
+	case "all":
 		return deepCopySetMap(item.JSON)
 	}
 	return map[string]any{}
 }
 
-func includeOtherSetFields(params map[string]any) bool {
+func setBaseBinary(item dataplane.Item, params map[string]any, nodeVersion float64) map[string]dataplane.Binary {
+	if len(item.Binary) == 0 {
+		return nil
+	}
+	include := effectiveSetInclude(params, nodeVersion)
+	if include == "none" {
+		return nil
+	}
+	options := rawOptions(params)
+	if nodeVersion >= 3.4 {
+		if boolParam(options, "stripBinary", true) {
+			return nil
+		}
+	} else if !boolParam(options, "includeBinary", true) {
+		return nil
+	}
+	return item.Binary
+}
+
+func effectiveSetInclude(params map[string]any, nodeVersion float64) string {
+	include := strings.ToLower(strings.TrimSpace(stringParam(params, "include")))
+	if include == "" {
+		include = "all"
+	}
 	if boolParam(params, "keepOnlySet", false) {
-		return false
+		return "none"
 	}
-	if strings.EqualFold(stringParam(params, "include"), "none") {
-		return false
+	if nodeVersion >= 3.3 && !boolParam(params, "includeOtherFields", false) {
+		return "none"
 	}
-	return boolParam(params, "includeOtherFields", true)
+	if nodeVersion < 3.3 && !boolParam(params, "includeOtherFields", true) && include == "" {
+		return "none"
+	}
+	return include
+}
+
+func copySetFields(source map[string]any, rawFields string, dotNotation bool) map[string]any {
+	result := map[string]any{}
+	for _, field := range splitSetFieldList(rawFields) {
+		if dotNotation && strings.Contains(field, ".") {
+			if value := nestedIFValue(source, field); value != nil {
+				setNestedSetValue(result, lastSetPathSegment(field), deepCopySetValue(value))
+			}
+			continue
+		}
+		if value, ok := source[field]; ok {
+			result[field] = deepCopySetValue(value)
+		}
+	}
+	return result
+}
+
+func splitSetFieldList(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t'
+	})
+	fields := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if field := strings.TrimSpace(part); field != "" {
+			fields = append(fields, field)
+		}
+	}
+	return fields
 }
 
 func collectSetFields(params map[string]any) []setField {
@@ -170,6 +233,7 @@ func parseSetField(object map[string]any) setField {
 	if fieldType == "" {
 		fieldType = inferSetFieldType(object)
 	}
+	fieldType = strings.TrimSuffix(fieldType, "Value")
 	value := firstNonNil(object["value"], object[fieldType+"Value"])
 	for _, key := range []string{"stringValue", "numberValue", "booleanValue", "arrayValue", "objectValue"} {
 		if value == nil {
@@ -414,6 +478,27 @@ func setNestedSetValue(target map[string]any, path string, value any) {
 		}
 		current = next
 	}
+}
+
+func unsetNestedSetValue(target map[string]any, path string) {
+	parts := strings.Split(path, ".")
+	current := target
+	for index, part := range parts {
+		if index == len(parts)-1 {
+			delete(current, part)
+			return
+		}
+		next, ok := current[part].(map[string]any)
+		if !ok {
+			return
+		}
+		current = next
+	}
+}
+
+func lastSetPathSegment(path string) string {
+	parts := strings.Split(path, ".")
+	return parts[len(parts)-1]
 }
 
 func deepCopySetMap(source map[string]any) map[string]any {

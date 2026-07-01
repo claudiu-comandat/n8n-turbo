@@ -12,13 +12,22 @@ import (
 func stringValue(params map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := params[key]; ok {
-			text := strings.TrimSpace(fmt.Sprint(value))
+			text := strings.TrimSpace(textValue(value))
 			if text != "" && text != "<nil>" {
 				return text
 			}
 		}
 	}
 	return ""
+}
+
+func textValue(value any) string {
+	if object, ok := value.(map[string]any); ok {
+		if raw, ok := object["value"]; ok {
+			return textValue(raw)
+		}
+	}
+	return fmt.Sprint(value)
 }
 
 func boolValue(params map[string]any, key string, def bool) bool {

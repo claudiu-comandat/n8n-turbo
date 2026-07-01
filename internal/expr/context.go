@@ -21,6 +21,7 @@ type Context struct {
 	ScheduledTime time.Time
 	RunIndex      int
 	Now           time.Time
+	Extra         map[string]any
 }
 
 func (c Context) CurrentItem() dataplane.Item {

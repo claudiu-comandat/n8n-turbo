@@ -73,8 +73,10 @@ func (n *Node) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.O
 
 func (n *Node) dispatch(ctx context.Context, cred *Credential, resource string, operation string, params map[string]any, item dataplane.Item) ([]dataplane.Item, error) {
 	switch resource {
-	case "message", "chatMessage":
+	case "message", "channelMessage":
 		return n.handleMessage(ctx, cred, operation, params, item)
+	case "chatMessage":
+		return n.handleChatMessage(ctx, cred, operation, params)
 	case "team", "teams":
 		return n.handleTeam(ctx, cred, operation, params)
 	case "channel", "channels":
@@ -83,6 +85,8 @@ func (n *Node) dispatch(ctx context.Context, cred *Credential, resource string, 
 		return n.handleUser(ctx, cred, operation, params)
 	case "chat", "chats":
 		return n.handleChat(ctx, cred, operation, params)
+	case "task", "tasks":
+		return n.handleTask(ctx, cred, operation, params)
 	default:
 		return nil, fmt.Errorf("unknown resource %s", resource)
 	}

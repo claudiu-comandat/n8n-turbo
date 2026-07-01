@@ -3,6 +3,8 @@ package push
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 )
 
 type EventType string
@@ -13,6 +15,7 @@ const (
 	EventExecutionWaiting         EventType = "executionWaiting"
 	EventNodeExecuteBefore        EventType = "nodeExecuteBefore"
 	EventNodeExecuteAfter         EventType = "nodeExecuteAfter"
+	EventNodeExecuteAfterData     EventType = "nodeExecuteAfterData"
 	EventWorkflowActivated        EventType = "workflowActivated"
 	EventWorkflowDeactivated      EventType = "workflowDeactivated"
 	EventWorkflowFailedToActivate EventType = "workflowFailedToActivate"
@@ -51,16 +54,29 @@ func NodeExecuteBefore(executionID string, workflowID string, nodeName string) M
 	}
 }
 
-func NodeExecuteAfter(executionID string, workflowID string, nodeName string, status string, task any) Message {
-	data, _ := json.Marshal(task)
+func NodeExecuteAfter(executionID string, workflowID string, nodeName string, status string, taskData dataplane.TaskData) Message {
 	return Message{
 		Type: EventNodeExecuteAfter,
 		Data: map[string]any{
-			"executionId":     executionID,
-			"workflowId":      workflowID,
-			"nodeName":        nodeName,
-			"executionStatus": status,
-			"data":            json.RawMessage(data),
+			"executionId":               executionID,
+			"workflowId":                workflowID,
+			"nodeName":                  nodeName,
+			"executionStatus":           status,
+			"itemCountByConnectionType": itemCountByConnectionType(taskData.Data),
+			"data":                      taskPayload(taskData, false),
+		},
+	}
+}
+
+func NodeExecuteAfterData(executionID string, workflowID string, nodeName string, taskData dataplane.TaskData) Message {
+	return Message{
+		Type: EventNodeExecuteAfterData,
+		Data: map[string]any{
+			"executionId":               executionID,
+			"workflowId":                workflowID,
+			"nodeName":                  nodeName,
+			"itemCountByConnectionType": itemCountByConnectionType(taskData.Data),
+			"data":                      taskPayload(taskData, true),
 		},
 	}
 }
@@ -77,6 +93,34 @@ func ExecutionFinished(executionID string, workflowID string, status string, run
 			"stoppedAt":   stoppedAt.UTC().Format(time.RFC3339Nano),
 		},
 	}
+}
+
+func taskPayload(task dataplane.TaskData, includeData bool) map[string]any {
+	payload := map[string]any{
+		"startTime":       task.StartTime,
+		"executionTime":   task.ExecutionTime,
+		"executionStatus": task.ExecutionStatus,
+		"executionIndex":  task.ExecutionIndex,
+		"source":          task.Source,
+	}
+	if includeData {
+		payload["data"] = task.Data
+	}
+	if task.Error != nil {
+		payload["error"] = task.Error
+	}
+	return payload
+}
+
+func itemCountByConnectionType(data dataplane.NodeExecutionData) map[string][]int {
+	counts := make(map[string][]int, len(data))
+	for connectionType, outputs := range data {
+		counts[connectionType] = make([]int, len(outputs))
+		for i, items := range outputs {
+			counts[connectionType][i] = len(items)
+		}
+	}
+	return counts
 }
 
 func ExecutionWaiting(executionID string) Message {

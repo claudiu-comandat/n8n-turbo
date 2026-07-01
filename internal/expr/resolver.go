@@ -17,7 +17,8 @@ type Resolver struct {
 	timeout time.Duration
 }
 
-var templateExpression = regexp.MustCompile(`=\{\{\s*(.*?)\s*\}\}`)
+var templateExpression = regexp.MustCompile(`=\s*\{\{\s*(.*?)\s*\}\}`)
+var fullTemplateExpression = regexp.MustCompile(`^\s*=\s*\{\{\s*(.*?)\s*\}\}\s*$`)
 
 func NewResolver(timeout time.Duration) *Resolver {
 	if timeout == 0 {
@@ -69,9 +70,11 @@ func (r *Resolver) MustResolve(raw any, exprCtx Context) any {
 
 func (r *Resolver) resolveString(value string, exprCtx Context) (any, error) {
 	trimmed := strings.TrimSpace(value)
-	if strings.HasPrefix(trimmed, "={{") && strings.HasSuffix(trimmed, "}}") && templateExpression.MatchString(trimmed) {
-		code := strings.TrimSuffix(strings.TrimPrefix(trimmed, "={{"), "}}")
-		return r.evaluate(strings.TrimSpace(code), exprCtx)
+	if groups := fullTemplateExpression.FindStringSubmatch(trimmed); len(groups) == 2 {
+		return r.evaluate(strings.TrimSpace(groups[1]), exprCtx)
+	}
+	if strings.HasPrefix(trimmed, "=") && !strings.HasPrefix(trimmed, "==") {
+		return r.evaluate(strings.TrimSpace(strings.TrimPrefix(trimmed, "=")), exprCtx)
 	}
 	if !templateExpression.MatchString(value) {
 		return value, nil
@@ -111,7 +114,7 @@ func (r *Resolver) evaluate(code string, exprCtx Context) (any, error) {
 }
 
 func (r *Resolver) release(vm *goja.Runtime) {
-	for _, name := range []string{"$json", "$binary", "$vars", "$secrets", "$now", "$today", "$itemIndex", "$runIndex", "$workflow", "$execution", "$input", "$node", "$json_stringify", "console", "DateTime", "N8nDateTime", "__n8nNow"} {
+	for _, name := range []string{"$json", "$binary", "$vars", "$secrets", "$now", "$today", "$itemIndex", "$runIndex", "$workflow", "$execution", "$input", "$node", "$json_stringify", "$response", "$pageCount", "console", "DateTime", "N8nDateTime", "__n8nNow"} {
 		_ = vm.Set(name, goja.Undefined())
 	}
 	r.pool.Put(vm)
@@ -153,6 +156,11 @@ func (r *Resolver) inject(vm *goja.Runtime, exprCtx Context) error {
 		},
 	})
 	_ = vm.Set("$node", nodeData(exprCtx.RunData))
+	for key, value := range exprCtx.Extra {
+		if strings.HasPrefix(key, "$") {
+			_ = vm.Set(key, value)
+		}
+	}
 	_ = vm.Set("$json_stringify", func(value any) string {
 		bytes, err := json.Marshal(value)
 		if err != nil {

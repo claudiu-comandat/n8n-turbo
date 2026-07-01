@@ -87,6 +87,25 @@ func stringSlice(params map[string]any, key string) []string {
 	}
 }
 
+func nestedMap(params map[string]any, key string) map[string]any {
+	if value, ok := params[key].(map[string]any); ok {
+		return value
+	}
+	return map[string]any{}
+}
+
+func nestedString(params map[string]any, parent string, keys ...string) string {
+	return stringValue(nestedMap(params, parent), keys...)
+}
+
+func nestedBool(params map[string]any, parent string, key string) bool {
+	return boolParam(nestedMap(params, parent), key)
+}
+
+func nestedStringSlice(params map[string]any, parent string, key string) []string {
+	return stringSlice(nestedMap(params, parent), key)
+}
+
 func listFrom(result map[string]any, key string) []map[string]any {
 	raw, _ := result[key].([]any)
 	out := make([]map[string]any, 0, len(raw))

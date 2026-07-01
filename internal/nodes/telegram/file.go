@@ -23,9 +23,9 @@ func (n *Node) sendMedia(ctx context.Context, cred *Credential, params map[strin
 	if binary, ok := item.Binary[property]; ok && binary.ID != "" {
 		return n.sendBinaryMedia(ctx, cred, params, binary, method, field, chatID)
 	}
-	fileID := stringParam(params, "fileId", field)
+	fileID := stringParam(params, "file", "fileId", field)
 	if fileID == "" {
-		return nil, fmt.Errorf("fileId or binary data is required")
+		return nil, fmt.Errorf("file or binary data is required")
 	}
 	body := map[string]any{"chat_id": chatID, field: fileID}
 	if caption := stringParam(params, "caption"); caption != "" {
@@ -33,6 +33,35 @@ func (n *Node) sendMedia(ctx context.Context, cred *Credential, params map[strin
 	}
 	addCommonMessageFields(body, params)
 	return n.callAPI(ctx, cred, method, body, chatID)
+}
+
+func (n *Node) sendMediaGroup(ctx context.Context, cred *Credential, params map[string]any) (map[string]any, error) {
+	chatID := stringParam(params, "chatId", "chat_id")
+	if chatID == "" {
+		return nil, fmt.Errorf("chatId is required")
+	}
+	media := mediaGroupItems(params["media"])
+	if len(media) == 0 {
+		return nil, fmt.Errorf("media is required")
+	}
+	body := map[string]any{"chat_id": chatID, "media": media}
+	addCommonMessageFields(body, params)
+	return n.callAPI(ctx, cred, "sendMediaGroup", body, chatID)
+}
+
+func mediaGroupItems(raw any) []any {
+	if raw == nil {
+		return nil
+	}
+	if values, ok := raw.([]any); ok {
+		return values
+	}
+	if object, ok := raw.(map[string]any); ok {
+		if values, ok := object["media"].([]any); ok {
+			return values
+		}
+	}
+	return nil
 }
 
 func (n *Node) sendBinaryMedia(ctx context.Context, cred *Credential, params map[string]any, binary dataplane.Binary, method string, field string, chatID string) (map[string]any, error) {

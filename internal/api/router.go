@@ -234,6 +234,7 @@ func NewServer(
 		r.Post("/rest/workflows/{id}/unpublish", server.handleDeactivateWorkflow)
 		r.Patch("/rest/workflows/{id}/unpublish", server.handleDeactivateWorkflow)
 		r.Post("/rest/workflows/{id}/run", server.handleRunWorkflow)
+		r.Post("/rest/dynamic-node-parameters/options", server.handleDynamicNodeParameterOptions)
 		r.Get("/rest/executions", server.handleListExecutions)
 		r.Get("/rest/executions/active", server.handleActiveExecutions)
 		r.Post("/rest/executions/delete", server.handleDeleteExecutions)

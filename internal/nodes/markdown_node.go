@@ -38,8 +38,9 @@ type markdownNodeOptions struct {
 }
 
 func executeMarkdownNode(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
-	operation := strings.ToLower(firstNonEmptyNode(stringParam(in.Node.Parameters, "operation"), "toHtml"))
+	operation := strings.ToLower(firstNonEmptyNode(stringParam(in.Node.Parameters, "mode"), stringParam(in.Node.Parameters, "operation"), "htmlToMarkdown"))
 	property := firstNonEmptyNode(stringParam(in.Node.Parameters, "dataPropertyName", "dataProperty", "fieldName"), "data")
+	destinationKey := firstNonEmptyNode(stringParam(in.Node.Parameters, "destinationKey"), property)
 	options := newMarkdownOptions(in.Node.Parameters)
 	items := firstInput(in.InputData)
 	output := make([]dataplane.Item, 0, len(items))
@@ -49,14 +50,13 @@ func executeMarkdownNode(ctx context.Context, in engine.ExecuteInput) (dataplane
 			return nil, ctx.Err()
 		default:
 		}
-		value, ok := item.JSON[property]
-		if !ok {
-			return nil, fmt.Errorf("markdown item %d: field %s not found", index, property)
+		content, err := markdownInputForItem(in, items, index, item, operation, property)
+		if err != nil {
+			return nil, fmt.Errorf("markdown item %d: %w", index, err)
 		}
-		content := fmt.Sprint(value)
 		next := cloneItem(item)
 		switch operation {
-		case "tohtml", "markdown":
+		case "markdowntohtml", "tohtml", "markdown":
 			if options.ExtractFrontMatter {
 				front, rest := extractMarkdownFrontMatter(content)
 				if front != nil {
@@ -68,19 +68,38 @@ func executeMarkdownNode(ctx context.Context, in engine.ExecuteInput) (dataplane
 			if err != nil {
 				return nil, fmt.Errorf("markdown toHtml item %d: %w", index, err)
 			}
-			next.JSON[property] = converted
-		case "fromhtml", "tomarkdown":
+			setNestedSetValue(next.JSON, destinationKey, converted)
+		case "htmltomarkdown", "fromhtml", "tomarkdown":
 			converted, err := htmlToMarkdown(content, options)
 			if err != nil {
 				return nil, fmt.Errorf("markdown fromHtml item %d: %w", index, err)
 			}
-			next.JSON[property] = converted
+			setNestedSetValue(next.JSON, destinationKey, converted)
 		default:
 			return nil, fmt.Errorf("markdown: unsupported operation %s", operation)
 		}
 		output = append(output, next)
 	}
 	return dataplane.MainOutput(output), nil
+}
+
+func markdownInputForItem(in engine.ExecuteInput, items []dataplane.Item, index int, item dataplane.Item, operation string, property string) (string, error) {
+	var value any
+	var ok bool
+	switch operation {
+	case "markdowntohtml":
+		value, ok = in.Node.Parameters["markdown"]
+	case "htmltomarkdown":
+		value, ok = in.Node.Parameters["html"]
+	}
+	if ok {
+		return fmt.Sprint(resolveValue(in, items, index, value)), nil
+	}
+	value, ok = item.JSON[property]
+	if !ok {
+		return "", fmt.Errorf("field %s not found", property)
+	}
+	return fmt.Sprint(value), nil
 }
 
 func newMarkdownOptions(params map[string]any) markdownNodeOptions {

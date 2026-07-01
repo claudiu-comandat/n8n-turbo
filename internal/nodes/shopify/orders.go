@@ -14,7 +14,7 @@ func (n *Node) handleOrder(ctx context.Context, cred Credential, operation strin
 	case OpGetAll, "list":
 		return n.listOrders(ctx, cred, params)
 	case OpGet:
-		id := int64Param(params, "orderId")
+		id := firstInt64(params, "orderId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("orderId is required")
 		}
@@ -29,7 +29,7 @@ func (n *Node) handleOrder(ctx context.Context, cred Credential, operation strin
 	case OpRefund:
 		return singleValue(n.refundOrder(ctx, cred, params))
 	case OpDelete:
-		id := int64Param(params, "orderId")
+		id := firstInt64(params, "orderId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("orderId is required")
 		}
@@ -86,11 +86,18 @@ func (n *Node) createOrder(ctx context.Context, cred Credential, params map[stri
 }
 
 func (n *Node) updateOrder(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
-	id := int64Param(params, "orderId")
+	id := firstInt64(params, "orderId", "id")
 	if id == 0 {
 		return nil, fmt.Errorf("orderId is required")
 	}
 	order := map[string]any{"id": id}
+	if update, err := mapParam(params, "updateFields"); err != nil {
+		return nil, err
+	} else {
+		for key, value := range update {
+			order[key] = value
+		}
+	}
 	for _, key := range []string{"email", "phone", "note", "tags"} {
 		setString(order, key, stringParam(params, key))
 	}
@@ -105,7 +112,7 @@ func (n *Node) updateOrder(ctx context.Context, cred Credential, params map[stri
 }
 
 func (n *Node) cancelOrder(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
-	id := int64Param(params, "orderId")
+	id := firstInt64(params, "orderId", "id")
 	if id == 0 {
 		return nil, fmt.Errorf("orderId is required")
 	}
@@ -128,7 +135,7 @@ func (n *Node) cancelOrder(ctx context.Context, cred Credential, params map[stri
 }
 
 func (n *Node) refundOrder(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
-	id := int64Param(params, "orderId")
+	id := firstInt64(params, "orderId", "id")
 	if id == 0 {
 		return nil, fmt.Errorf("orderId is required")
 	}
@@ -168,6 +175,13 @@ func orderBody(params map[string]any, item dataplane.Item) (map[string]any, erro
 			setString(order, "fulfillment_status", value)
 		default:
 			setString(order, key, value)
+		}
+	}
+	if extra, err := mapParam(params, "additionalFields"); err != nil {
+		return nil, err
+	} else {
+		for key, value := range extra {
+			order[key] = value
 		}
 	}
 	if lineItems, err := arrayParam(params, "lineItems"); err != nil {

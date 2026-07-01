@@ -2,19 +2,24 @@ package nodes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/dop251/goja"
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 	"github.com/n8n-io/n8n-turbo/internal/engine"
 )
 
 type Sort struct{}
+
+var sortReturnPattern = regexp.MustCompile(`\breturn\b`)
 
 type sortParams struct {
 	Type               string
@@ -41,13 +46,19 @@ func (Sort) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Outp
 	}
 	items := cloneItems(firstInput(in.InputData))
 	params := newSortParams(in.Node.Parameters)
-	if len(items) <= 1 {
+	if len(items) <= 1 && params.Type != "code" {
 		return dataplane.MainOutput(items), nil
 	}
 	switch params.Type {
 	case "random":
 		sortRandomItems(items, params)
 		return dataplane.MainOutput(items), nil
+	case "code":
+		sorted, err := sortCodeItems(ctx, items, stringParam(in.Node.Parameters, "code"))
+		if err != nil {
+			return nil, err
+		}
+		return dataplane.MainOutput(sorted), nil
 	case "simple", "":
 		if len(params.SortFields) == 0 {
 			return nil, fmt.Errorf("sort: at least one sort field is required")
@@ -59,6 +70,57 @@ func (Sort) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Outp
 	default:
 		return nil, fmt.Errorf("sort: unsupported type %s", params.Type)
 	}
+}
+
+func sortCodeItems(ctx context.Context, items []dataplane.Item, source string) ([]dataplane.Item, error) {
+	if !sortReturnPattern.MatchString(source) {
+		return nil, fmt.Errorf("sort code doesn't return. Please add a 'return' statement to your code")
+	}
+	vm := goja.New()
+	_ = vm.Set("items", codeInputItems(items))
+	_ = vm.Set("require", goja.Undefined())
+	_ = vm.Set("process", goja.Undefined())
+	_ = vm.Set("console", map[string]any{
+		"log":   func(...any) {},
+		"error": func(...any) {},
+		"warn":  func(...any) {},
+	})
+	done := make(chan struct{})
+	timer := time.AfterFunc(10*time.Second, func() {
+		vm.Interrupt("sort code execution timed out")
+	})
+	defer timer.Stop()
+	go func() {
+		select {
+		case <-ctx.Done():
+			vm.Interrupt(ctx.Err())
+		case <-done:
+		}
+	}()
+	value, err := vm.RunString("(function(){ return items.sort(function(a, b) { " + source + "\n}); })()")
+	close(done)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if strings.Contains(err.Error(), "sort code execution timed out") {
+			return nil, fmt.Errorf("sort code execution timed out")
+		}
+		return nil, err
+	}
+	return sortCodeItemsFromAny(value.Export())
+}
+
+func sortCodeItemsFromAny(value any) ([]dataplane.Item, error) {
+	bytes, err := json.Marshal(value)
+	if err != nil {
+		return codeItemsFromAny(value)
+	}
+	var normalized any
+	if err := json.Unmarshal(bytes, &normalized); err != nil {
+		return codeItemsFromAny(value)
+	}
+	return codeItemsFromAny(normalized)
 }
 
 func newSortParams(raw map[string]any) sortParams {

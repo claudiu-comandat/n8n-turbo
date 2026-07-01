@@ -22,6 +22,10 @@ func (e GraphError) ErrorMessage() error {
 }
 
 func (n *Node) doJSON(ctx context.Context, cred *Credential, method string, path string, body any) (map[string]any, error) {
+	return n.doJSONWithHeaders(ctx, cred, method, path, body, nil)
+}
+
+func (n *Node) doJSONWithHeaders(ctx context.Context, cred *Credential, method string, path string, body any, headers map[string]string) (map[string]any, error) {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -38,6 +42,9 @@ func (n *Node) doJSON(ctx context.Context, cred *Credential, method string, path
 	request.Header.Set("Accept", "application/json")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		request.Header.Set(key, value)
 	}
 	response, err := n.client.Do(request)
 	if err != nil {

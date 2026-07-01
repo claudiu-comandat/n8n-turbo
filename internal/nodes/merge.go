@@ -2,11 +2,15 @@ package nodes
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 	"github.com/n8n-io/n8n-turbo/internal/engine"
+	_ "modernc.org/sqlite"
 )
 
 type Merge struct{}
@@ -18,8 +22,12 @@ type mergeFieldMatch struct {
 
 type mergeParams struct {
 	Mode                 string
+	CombineBy            string
 	JoinMode             string
+	OutputDataFrom       string
 	FieldsToMatch        []mergeFieldMatch
+	ChooseBranchMode     string
+	ChooseBranchOutput   string
 	ChooseBranchInput    int
 	ChooseBranchFallback string
 	IncludeUnpaired      bool
@@ -27,6 +35,7 @@ type mergeParams struct {
 	MultipleMatches      string
 	FuzzyCompare         bool
 	ResolveClash         string
+	Query                string
 }
 
 func (Merge) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
@@ -49,8 +58,14 @@ func (Merge) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Out
 			return nil, err
 		}
 		return dataplane.MainOutput(items), nil
-	case "multiplex":
+	case "multiplex", "combineall":
 		return dataplane.MainOutput(mergeMultiplex(in.InputData, params)), nil
+	case "combinebysql":
+		items, err := mergeBySQL(ctx, in.InputData, params.Query)
+		if err != nil {
+			return nil, err
+		}
+		return dataplane.MainOutput(items), nil
 	default:
 		return nil, fmt.Errorf("unsupported merge mode %q", params.Mode)
 	}
@@ -58,18 +73,28 @@ func (Merge) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Out
 
 func parseMergeParams(raw map[string]any) mergeParams {
 	options := mergeObject(raw["options"])
+	mode := firstNonEmptyNode(stringParam(raw, "mode"), "append")
+	combineBy := firstNonEmptyNode(stringParam(raw, "combineBy"), "combineByFields")
+	if strings.EqualFold(mode, "combine") {
+		mode = combineBy
+	}
 	params := mergeParams{
-		Mode:                 firstNonEmptyNode(stringParam(raw, "mode"), "append"),
+		Mode:                 mode,
+		CombineBy:            combineBy,
 		JoinMode:             firstNonEmptyNode(stringParam(raw, "joinMode"), stringParam(raw, "join"), "keepMatches"),
-		ChooseBranchInput:    intParam(raw, "chooseBranchInput", intParam(raw, "input", 0)),
+		OutputDataFrom:       firstNonEmptyNode(stringParam(raw, "outputDataFrom"), "both"),
+		ChooseBranchMode:     stringParam(raw, "chooseBranchMode"),
+		ChooseBranchOutput:   stringParam(raw, "output"),
+		ChooseBranchInput:    intParam(raw, "chooseBranchInput", intParam(raw, "input", intParam(raw, "useDataOfInput", 1)-1)),
 		ChooseBranchFallback: stringParam(raw, "chooseBranchFallback", "fallback"),
 		IncludeUnpaired:      boolParam(options, "includeUnpaired", boolParam(raw, "includeUnpaired", false)),
 		DisableDotNotation:   boolParam(options, "disableDotNotation", boolParam(raw, "disableDotNotation", false)),
 		MultipleMatches:      firstNonEmptyNode(stringParam(options, "multipleMatches"), stringParam(raw, "multipleMatches"), "all"),
 		FuzzyCompare:         boolParam(options, "fuzzyCompare", boolParam(raw, "fuzzyCompare", false)),
 		ResolveClash:         mergeResolveClash(raw, options),
+		Query:                stringParam(raw, "query"),
 	}
-	params.FieldsToMatch = parseMergeFields(firstNonNil(raw["fieldsToMatch"], raw["fields"], raw["matchingFields"]))
+	params.FieldsToMatch = parseMergeFields(firstNonNil(raw["fieldsToMatch"], raw["mergeByFields"], raw["fields"], raw["matchingFields"], raw["fieldsToMatchString"]))
 	return params
 }
 
@@ -101,7 +126,15 @@ func parseMergeFields(raw any) []mergeFieldMatch {
 		return parseMergeFieldList(values)
 	}
 	if text := strings.TrimSpace(fmt.Sprint(raw)); text != "" && text != "<nil>" {
-		return []mergeFieldMatch{{Field1: text, Field2: text}}
+		parts := strings.Split(text, ",")
+		fields := make([]mergeFieldMatch, 0, len(parts))
+		for _, part := range parts {
+			field := strings.TrimSpace(part)
+			if field != "" {
+				fields = append(fields, mergeFieldMatch{Field1: field, Field2: field})
+			}
+		}
+		return fields
 	}
 	return nil
 }
@@ -135,7 +168,151 @@ func mergeAppend(inputs dataplane.Output) []dataplane.Item {
 	return items
 }
 
+func mergeBySQL(ctx context.Context, inputs dataplane.Output, query string) ([]dataplane.Item, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("merge SQL query is required")
+	}
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	for index, input := range inputs {
+		table := fmt.Sprintf("input%d", index+1)
+		columns := mergeSQLColumns(input)
+		if len(columns) == 0 {
+			columns = []string{"json"}
+		}
+		if err := mergeSQLCreateTable(ctx, db, table, columns); err != nil {
+			return nil, err
+		}
+		if err := mergeSQLInsertItems(ctx, db, table, columns, input); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	result := []dataplane.Item{}
+	for rows.Next() {
+		values := make([]any, len(names))
+		scan := make([]any, len(names))
+		for index := range values {
+			scan[index] = &values[index]
+		}
+		if err := rows.Scan(scan...); err != nil {
+			return nil, err
+		}
+		item := dataplane.Item{JSON: map[string]any{}}
+		for index, name := range names {
+			item.JSON[name] = mergeSQLValue(values[index])
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func mergeSQLColumns(input []dataplane.Item) []string {
+	seen := map[string]bool{}
+	for _, item := range input {
+		for key := range item.JSON {
+			if key != "" {
+				seen[key] = true
+			}
+		}
+	}
+	columns := make([]string, 0, len(seen))
+	for key := range seen {
+		columns = append(columns, key)
+	}
+	sort.Strings(columns)
+	return columns
+}
+
+func mergeSQLCreateTable(ctx context.Context, db *sql.DB, table string, columns []string) error {
+	definitions := make([]string, 0, len(columns))
+	for _, column := range columns {
+		definitions = append(definitions, mergeSQLQuote(column))
+	}
+	_, err := db.ExecContext(ctx, "CREATE TABLE "+mergeSQLQuote(table)+" ("+strings.Join(definitions, ", ")+")")
+	return err
+}
+
+func mergeSQLInsertItems(ctx context.Context, db *sql.DB, table string, columns []string, input []dataplane.Item) error {
+	if len(input) == 0 {
+		return nil
+	}
+	quotedColumns := make([]string, 0, len(columns))
+	placeholders := make([]string, 0, len(columns))
+	for _, column := range columns {
+		quotedColumns = append(quotedColumns, mergeSQLQuote(column))
+		placeholders = append(placeholders, "?")
+	}
+	stmt, err := db.PrepareContext(ctx, "INSERT INTO "+mergeSQLQuote(table)+" ("+strings.Join(quotedColumns, ", ")+") VALUES ("+strings.Join(placeholders, ", ")+")")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, item := range input {
+		args := make([]any, 0, len(columns))
+		for _, column := range columns {
+			args = append(args, mergeSQLParam(item.JSON[column]))
+		}
+		if _, err := stmt.ExecContext(ctx, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mergeSQLQuote(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
+
+func mergeSQLParam(value any) any {
+	switch typed := value.(type) {
+	case nil, string, int, int64, float64, bool:
+		return typed
+	default:
+		raw, err := json.Marshal(typed)
+		if err != nil {
+			return fmt.Sprint(typed)
+		}
+		return string(raw)
+	}
+}
+
+func mergeSQLValue(value any) any {
+	if bytes, ok := value.([]byte); ok {
+		return string(bytes)
+	}
+	return value
+}
+
 func mergeChooseBranch(inputs dataplane.Output, params mergeParams) []dataplane.Item {
+	if strings.EqualFold(params.ChooseBranchMode, "waitForAll") {
+		switch strings.ToLower(params.ChooseBranchOutput) {
+		case "specifiedinput":
+			index := params.ChooseBranchInput
+			if index < 0 {
+				index = 0
+			}
+			return mergeInput(inputs, index)
+		case "empty":
+			return []dataplane.Item{{JSON: map[string]any{}}}
+		default:
+			return []dataplane.Item{}
+		}
+	}
 	index := params.ChooseBranchInput
 	if index < 0 || index >= len(inputs) {
 		index = 0
@@ -191,8 +368,10 @@ func mergeByFields(inputs dataplane.Output, params mergeParams) ([]dataplane.Ite
 	}
 	index := mergeBuildIndex(right, params, true)
 	matchedRight := map[int]bool{}
+	matchedLeft := map[int]bool{}
+	matchedRightItems := []dataplane.Item{}
 	result := []dataplane.Item{}
-	for _, leftItem := range left {
+	for leftIndex, leftItem := range left {
 		key := mergeMatchKey(leftItem.JSON, params, false)
 		matches := index[key]
 		if params.FuzzyCompare && len(matches) == 0 {
@@ -200,22 +379,34 @@ func mergeByFields(inputs dataplane.Output, params mergeParams) ([]dataplane.Ite
 		}
 		hasMatch := len(matches) > 0
 		switch strings.ToLower(params.JoinMode) {
-		case "", "keepmatches":
+		case "", "keepmatches", "keepeverything":
 			if hasMatch {
+				matchedLeft[leftIndex] = true
 				for _, rightIndex := range matches {
 					matchedRight[rightIndex] = true
-					result = append(result, mergeItems(leftItem, right[rightIndex], params))
+					matchedRightItems = append(matchedRightItems, right[rightIndex])
+					if strings.EqualFold(params.OutputDataFrom, "both") {
+						result = append(result, mergeItems(leftItem, right[rightIndex], params))
+					}
 					if strings.EqualFold(params.MultipleMatches, "first") {
 						break
 					}
 				}
+				if strings.EqualFold(params.OutputDataFrom, "input1") {
+					result = append(result, leftItem)
+				}
 			}
 		case "keepnonmatches":
 			if !hasMatch {
-				result = append(result, leftItem)
+				if strings.EqualFold(params.OutputDataFrom, "both") {
+					result = append(result, mergeSourceItem(leftItem, "input1"))
+				} else if strings.EqualFold(params.OutputDataFrom, "input1") {
+					result = append(result, leftItem)
+				}
 			}
 		case "enrichinput1":
 			if hasMatch {
+				matchedLeft[leftIndex] = true
 				for _, rightIndex := range matches {
 					matchedRight[rightIndex] = true
 					result = append(result, mergeItems(leftItem, right[rightIndex], params))
@@ -228,6 +419,7 @@ func mergeByFields(inputs dataplane.Output, params mergeParams) ([]dataplane.Ite
 			}
 		case "enrichinput2":
 			if hasMatch {
+				matchedLeft[leftIndex] = true
 				for _, rightIndex := range matches {
 					matchedRight[rightIndex] = true
 					result = append(result, mergeItems(right[rightIndex], leftItem, params))
@@ -235,6 +427,38 @@ func mergeByFields(inputs dataplane.Output, params mergeParams) ([]dataplane.Ite
 			}
 		default:
 			return nil, fmt.Errorf("unsupported merge join mode %q", params.JoinMode)
+		}
+	}
+	if strings.EqualFold(params.JoinMode, "keepMatches") && strings.EqualFold(params.OutputDataFrom, "input2") {
+		return matchedRightItems, nil
+	}
+	if strings.EqualFold(params.JoinMode, "keepNonMatches") {
+		if strings.EqualFold(params.OutputDataFrom, "input2") || strings.EqualFold(params.OutputDataFrom, "both") {
+			for index, item := range right {
+				if !matchedRight[index] {
+					if strings.EqualFold(params.OutputDataFrom, "both") {
+						result = append(result, mergeSourceItem(item, "input2"))
+					} else {
+						result = append(result, item)
+					}
+				}
+			}
+		}
+		return result, nil
+	}
+	if strings.EqualFold(params.JoinMode, "keepEverything") {
+		if strings.EqualFold(params.OutputDataFrom, "input2") {
+			result = matchedRightItems
+		}
+		for index, item := range left {
+			if !matchedLeft[index] {
+				result = append(result, item)
+			}
+		}
+		for index, item := range right {
+			if !matchedRight[index] {
+				result = append(result, item)
+			}
 		}
 	}
 	if strings.EqualFold(params.JoinMode, "enrichInput2") {
@@ -245,6 +469,12 @@ func mergeByFields(inputs dataplane.Output, params mergeParams) ([]dataplane.Ite
 		}
 	}
 	return result, nil
+}
+
+func mergeSourceItem(item dataplane.Item, source string) dataplane.Item {
+	next := cloneItem(item)
+	next.JSON["_source"] = source
+	return next
 }
 
 func mergeMultiplex(inputs dataplane.Output, params mergeParams) []dataplane.Item {
@@ -310,7 +540,7 @@ func mergeJSONMaps(left map[string]any, right map[string]any, resolveClash strin
 	for key, value := range right {
 		if existing, ok := result[key]; ok {
 			switch strings.ToLower(resolveClash) {
-			case "preferfield1":
+			case "preferfield1", "preferinput1":
 				result[key] = existing
 			case "addsuffix":
 				delete(result, key)

@@ -10,7 +10,7 @@ import (
 
 func (n *Node) handleCall(ctx context.Context, cred Credential, operation string, params map[string]any) ([]dataplane.Item, error) {
 	switch operation {
-	case "create":
+	case "create", "make":
 		return single(n.createCall(ctx, cred, params))
 	case "get":
 		callSid := stringParam(params, "callSid", "sid")
@@ -38,11 +38,19 @@ func (n *Node) createCall(ctx context.Context, cred Credential, params map[strin
 	to := stringParam(params, "to")
 	callURL := stringParam(params, "url")
 	twiml := stringParam(params, "twiml")
+	message := stringParam(params, "message")
 	if from == "" || to == "" {
 		return nil, fmt.Errorf("from and to are required")
 	}
+	if message != "" {
+		if boolParam(params, "twiml") {
+			twiml = message
+		} else {
+			twiml = "<Response><Say>" + xmlEscape(message) + "</Say></Response>"
+		}
+	}
 	if callURL == "" && twiml == "" {
-		return nil, fmt.Errorf("url or twiml is required")
+		return nil, fmt.Errorf("message, url, or twiml is required")
 	}
 	form := url.Values{}
 	form.Set("From", from)
@@ -51,6 +59,7 @@ func (n *Node) createCall(ctx context.Context, cred Credential, params map[strin
 	formAdd(form, "Twiml", twiml)
 	formAdd(form, "Method", stringParam(params, "method"))
 	formAdd(form, "StatusCallback", stringParam(params, "statusCallback"))
+	formAdd(form, "StatusCallback", nestedStringParam(params, "options", "statusCallback"))
 	formAdd(form, "MachineDetection", stringParam(params, "machineDetection"))
 	formAddInt(form, "Timeout", intParam(params, "timeout"))
 	if boolParam(params, "record") {

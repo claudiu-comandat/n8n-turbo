@@ -69,7 +69,7 @@ func (n *Node) dispatch(ctx context.Context, cred Credential, resource string, o
 		return n.handleBoard(ctx, cred, operation, params)
 	case "list", "lists":
 		return n.handleList(ctx, cred, operation, params)
-	case "member", "members":
+	case "member", "members", "boardMember":
 		return n.handleMember(ctx, cred, operation, params)
 	case "checklist", "checklists":
 		return n.handleChecklist(ctx, cred, operation, params)
@@ -77,7 +77,7 @@ func (n *Node) dispatch(ctx context.Context, cred Credential, resource string, o
 		return n.handleLabel(ctx, cred, operation, params)
 	case "attachment", "attachments":
 		return n.handleAttachment(ctx, cred, operation, params, item)
-	case "comment", "comments":
+	case "comment", "comments", "cardComment":
 		return n.handleComment(ctx, cred, operation, params)
 	default:
 		return nil, fmt.Errorf("unknown resource %s", resource)

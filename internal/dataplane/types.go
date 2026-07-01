@@ -11,19 +11,20 @@ type WorkflowID string
 type ExecutionID string
 
 type Workflow struct {
-	ID          string                     `json:"id,omitempty"`
-	Name        string                     `json:"name"`
-	Active      bool                       `json:"active"`
-	Nodes       []Node                     `json:"nodes"`
-	Connections Connections                `json:"connections"`
-	Settings    map[string]any             `json:"settings,omitempty"`
-	PinData     map[string][]Item          `json:"pinData,omitempty"`
-	StaticData  map[string]any             `json:"staticData,omitempty"`
-	Meta        map[string]any             `json:"meta,omitempty"`
-	VersionID   string                     `json:"versionId,omitempty"`
-	CreatedAt   *time.Time                 `json:"createdAt,omitempty"`
-	UpdatedAt   *time.Time                 `json:"updatedAt,omitempty"`
-	Raw         map[string]json.RawMessage `json:"-"`
+	ID            string            `json:"id,omitempty"`
+	Name          string            `json:"name"`
+	Active        bool              `json:"active"`
+	Nodes         []Node            `json:"nodes"`
+	Connections   Connections       `json:"connections"`
+	Settings      map[string]any    `json:"settings,omitempty"`
+	PinData       map[string][]Item `json:"pinData,omitempty"`
+	StaticData    map[string]any    `json:"staticData,omitempty"`
+	Meta          map[string]any    `json:"meta,omitempty"`
+	VersionID     string            `json:"versionId,omitempty"`
+	CreatedAt     *time.Time        `json:"createdAt,omitempty"`
+	UpdatedAt     *time.Time        `json:"updatedAt,omitempty"`
+	presentFields map[string]bool
+	Raw           map[string]json.RawMessage `json:"-"`
 }
 
 func (w *Workflow) UnmarshalJSON(data []byte) error {
@@ -34,10 +35,15 @@ func (w *Workflow) UnmarshalJSON(data []byte) error {
 	}
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal(data, &raw)
+	present := make(map[string]bool, len(raw))
+	for key := range raw {
+		present[key] = true
+	}
 	for _, key := range []string{"id", "name", "active", "nodes", "connections", "settings", "pinData", "staticData", "meta", "versionId", "createdAt", "updatedAt"} {
 		delete(raw, key)
 	}
 	*w = Workflow(alias)
+	w.presentFields = present
 	w.Raw = raw
 	return nil
 }
@@ -54,30 +60,44 @@ func (w Workflow) MarshalJSON() ([]byte, error) {
 	if err := overlayJSON(merged, known); err != nil {
 		return nil, err
 	}
+	preserveExplicitObject(merged, w.presentFields, "settings", w.Settings)
+	preserveExplicitObject(merged, w.presentFields, "pinData", w.PinData)
+	preserveExplicitObject(merged, w.presentFields, "staticData", w.StaticData)
+	preserveExplicitObject(merged, w.presentFields, "meta", w.Meta)
 	return json.Marshal(merged)
 }
 
+func (w *Workflow) PreserveFields(keys ...string) {
+	if w.presentFields == nil {
+		w.presentFields = map[string]bool{}
+	}
+	for _, key := range keys {
+		w.presentFields[key] = true
+	}
+}
+
 type Node struct {
-	ID                    string                     `json:"id,omitempty"`
-	Name                  string                     `json:"name"`
-	Type                  string                     `json:"type"`
-	TypeVersion           float64                    `json:"typeVersion,omitempty"`
-	Position              []float64                  `json:"position,omitempty"`
-	Parameters            map[string]any             `json:"parameters,omitempty"`
-	Credentials           map[string]CredentialRef   `json:"credentials,omitempty"`
-	Disabled              bool                       `json:"disabled,omitempty"`
-	ContinueOnFail        bool                       `json:"continueOnFail,omitempty"`
-	OnError               string                     `json:"onError,omitempty"`
-	AlwaysOutputData      bool                       `json:"alwaysOutputData,omitempty"`
-	ExecuteOnce           bool                       `json:"executeOnce,omitempty"`
-	RetryOnFail           bool                       `json:"retryOnFail,omitempty"`
-	MaxTries              int                        `json:"maxTries,omitempty"`
-	WaitBetweenTries      int                        `json:"waitBetweenTries,omitempty"`
-	UseExponentialBackoff bool                       `json:"useExponentialBackoff,omitempty"`
-	Notes                 string                     `json:"notes,omitempty"`
-	NotesInFlow           bool                       `json:"notesInFlow,omitempty"`
-	Color                 string                     `json:"color,omitempty"`
-	WebhookID             string                     `json:"webhookId,omitempty"`
+	ID                    string                   `json:"id,omitempty"`
+	Name                  string                   `json:"name"`
+	Type                  string                   `json:"type"`
+	TypeVersion           float64                  `json:"typeVersion,omitempty"`
+	Position              []float64                `json:"position,omitempty"`
+	Parameters            map[string]any           `json:"parameters"`
+	Credentials           map[string]CredentialRef `json:"credentials,omitempty"`
+	Disabled              bool                     `json:"disabled,omitempty"`
+	ContinueOnFail        bool                     `json:"continueOnFail,omitempty"`
+	OnError               string                   `json:"onError,omitempty"`
+	AlwaysOutputData      bool                     `json:"alwaysOutputData,omitempty"`
+	ExecuteOnce           bool                     `json:"executeOnce,omitempty"`
+	RetryOnFail           bool                     `json:"retryOnFail,omitempty"`
+	MaxTries              int                      `json:"maxTries,omitempty"`
+	WaitBetweenTries      int                      `json:"waitBetweenTries,omitempty"`
+	UseExponentialBackoff bool                     `json:"useExponentialBackoff,omitempty"`
+	Notes                 string                   `json:"notes,omitempty"`
+	NotesInFlow           bool                     `json:"notesInFlow,omitempty"`
+	Color                 string                   `json:"color,omitempty"`
+	WebhookID             string                   `json:"webhookId,omitempty"`
+	presentFields         map[string]bool
 	Raw                   map[string]json.RawMessage `json:"-"`
 }
 
@@ -89,10 +109,15 @@ func (n *Node) UnmarshalJSON(data []byte) error {
 	}
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal(data, &raw)
+	present := make(map[string]bool, len(raw))
+	for key := range raw {
+		present[key] = true
+	}
 	for _, key := range []string{"id", "name", "type", "typeVersion", "position", "parameters", "credentials", "disabled", "continueOnFail", "onError", "alwaysOutputData", "executeOnce", "retryOnFail", "maxTries", "waitBetweenTries", "useExponentialBackoff", "notes", "notesInFlow", "color", "webhookId"} {
 		delete(raw, key)
 	}
 	*n = Node(alias)
+	n.presentFields = present
 	n.Raw = raw
 	return nil
 }
@@ -108,6 +133,22 @@ func (n Node) MarshalJSON() ([]byte, error) {
 	merged := copyRawMap(n.Raw)
 	if err := overlayJSON(merged, known); err != nil {
 		return nil, err
+	}
+	for _, field := range []struct {
+		jsonKey string
+		value   bool
+	}{
+		{"disabled", n.Disabled},
+		{"continueOnFail", n.ContinueOnFail},
+		{"alwaysOutputData", n.AlwaysOutputData},
+		{"executeOnce", n.ExecuteOnce},
+		{"retryOnFail", n.RetryOnFail},
+		{"useExponentialBackoff", n.UseExponentialBackoff},
+		{"notesInFlow", n.NotesInFlow},
+	} {
+		if field.value || n.presentFields[field.jsonKey] {
+			merged[field.jsonKey] = json.RawMessage(fmt.Sprintf("%t", field.value))
+		}
 	}
 	return json.Marshal(merged)
 }
@@ -132,6 +173,18 @@ func overlayJSON(target map[string]json.RawMessage, source []byte) error {
 		target[key] = value
 	}
 	return nil
+}
+
+func preserveExplicitObject(target map[string]json.RawMessage, present map[string]bool, key string, value any) {
+	if !present[key] {
+		return
+	}
+	data, err := json.Marshal(value)
+	if err != nil || string(data) == "null" {
+		target[key] = json.RawMessage("{}")
+		return
+	}
+	target[key] = data
 }
 
 type OnErrorBehavior string

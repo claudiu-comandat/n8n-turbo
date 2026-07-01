@@ -13,7 +13,7 @@ import (
 
 func (n *Node) sendMessage(ctx context.Context, cred *Credential, params map[string]any) (map[string]any, error) {
 	chatID := stringParam(params, "chatId", "chat_id")
-	text := stringParam(params, "text")
+	text := stringParam(params, "text", "message")
 	if chatID == "" {
 		return nil, fmt.Errorf("chatId is required")
 	}
@@ -90,6 +90,9 @@ func (n *Node) simpleChatCall(ctx context.Context, cred *Credential, params map[
 func (n *Node) answerCallbackQuery(ctx context.Context, cred *Credential, params map[string]any) (map[string]any, error) {
 	queryID := stringParam(params, "callbackQueryId", "callback_query_id")
 	if queryID == "" {
+		queryID = stringParam(params, "queryId")
+	}
+	if queryID == "" {
 		return nil, fmt.Errorf("callbackQueryId is required")
 	}
 	body := map[string]any{"callback_query_id": queryID}
@@ -106,6 +109,31 @@ func (n *Node) answerCallbackQuery(ctx context.Context, cred *Credential, params
 		body["cache_time"] = cacheTime
 	}
 	return n.callAPI(ctx, cred, "answerCallbackQuery", body, "")
+}
+
+func (n *Node) answerInlineQuery(ctx context.Context, cred *Credential, params map[string]any) (map[string]any, error) {
+	queryID := stringParam(params, "queryId", "inlineQueryId", "inline_query_id")
+	if queryID == "" {
+		return nil, fmt.Errorf("queryId is required")
+	}
+	results, err := parseJSONValue(stringParam(params, "results"))
+	if err != nil {
+		return nil, fmt.Errorf("results: %w", err)
+	}
+	body := map[string]any{"inline_query_id": queryID, "results": results}
+	for source, target := range map[string]string{
+		"cache_time":          "cache_time",
+		"is_personal":         "is_personal",
+		"next_offset":         "next_offset",
+		"button":              "button",
+		"switch_pm_text":      "switch_pm_text",
+		"switch_pm_parameter": "switch_pm_parameter",
+	} {
+		if value, ok := mapParam(params, "additionalFields")[source]; ok {
+			body[target] = value
+		}
+	}
+	return n.callAPI(ctx, cred, "answerInlineQuery", body, "")
 }
 
 func (n *Node) getUpdates(ctx context.Context, cred *Credential, params map[string]any) ([]dataplane.Item, error) {
@@ -172,17 +200,29 @@ func addCommonMessageFields(body map[string]any, params map[string]any) {
 		"protectContent":        "protect_content",
 		"replyToMessageId":      "reply_to_message_id",
 		"disableWebPagePreview": "disable_web_page_preview",
+		"messageThreadId":       "message_thread_id",
 	} {
 		if value, ok := params[source]; ok {
 			body[target] = value
 		}
 	}
 	for source, target := range map[string]string{
-		"parseMode":             "parse_mode",
-		"disableNotification":   "disable_notification",
-		"protectContent":        "protect_content",
-		"replyToMessageId":      "reply_to_message_id",
-		"disableWebPagePreview": "disable_web_page_preview",
+		"caption":                  "caption",
+		"duration":                 "duration",
+		"height":                   "height",
+		"parse_mode":               "parse_mode",
+		"parseMode":                "parse_mode",
+		"disableNotification":      "disable_notification",
+		"disable_notification":     "disable_notification",
+		"protectContent":           "protect_content",
+		"replyToMessageId":         "reply_to_message_id",
+		"reply_to_message_id":      "reply_to_message_id",
+		"disableWebPagePreview":    "disable_web_page_preview",
+		"disable_web_page_preview": "disable_web_page_preview",
+		"message_thread_id":        "message_thread_id",
+		"performer":                "performer",
+		"title":                    "title",
+		"width":                    "width",
 	} {
 		if value, ok := mapParam(params, "additionalFields")[source]; ok {
 			body[target] = value

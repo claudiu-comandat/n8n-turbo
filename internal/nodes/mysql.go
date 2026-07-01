@@ -15,9 +15,10 @@ import (
 type MySQL struct{}
 
 func (MySQL) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
-	dsn := stringParam(in.Node.Parameters, "connectionString", "dsn")
+	credential := credentialByType(in.Credentials, "mySql", "mysql", "mysqlDb", "mySqlDb", "credentials")
+	dsn := firstNonEmptyNode(stringParam(in.Node.Parameters, "connectionString", "dsn"), credentialString(credential, "connectionString", "dsn"))
 	if dsn == "" {
-		dsn = mysqlDSN(in.Node.Parameters)
+		dsn = mysqlDSN(in.Node.Parameters, credential)
 	}
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -37,17 +38,17 @@ func (MySQL) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Out
 	return executeSQLNode(ctx, db, in, mysqlDialect)
 }
 
-func mysqlDSN(params map[string]any) string {
-	host := stringParam(params, "host")
+func mysqlDSN(params map[string]any, credential map[string]any) string {
+	host := firstNonEmptyNode(stringParam(params, "host"), credentialString(credential, "host"))
 	if host == "" {
 		host = "localhost"
 	}
-	port := intParam(params, "port", 3306)
-	charset := stringParam(params, "charset")
+	port := intParam(params, "port", intParam(credential, "port", 3306))
+	charset := firstNonEmptyNode(stringParam(params, "charset"), credentialString(credential, "charset"))
 	if charset == "" {
 		charset = "utf8mb4"
 	}
-	locationName := stringParam(params, "timezone", "location")
+	locationName := firstNonEmptyNode(stringParam(params, "timezone", "location"), credentialString(credential, "timezone", "location"))
 	if locationName == "" {
 		locationName = "UTC"
 	}
@@ -56,26 +57,26 @@ func mysqlDSN(params map[string]any) string {
 		location = time.UTC
 	}
 	cfg := drivermysql.NewConfig()
-	cfg.User = stringParam(params, "user", "username")
-	cfg.Passwd = stringParam(params, "password")
+	cfg.User = firstNonEmptyNode(stringParam(params, "user", "username"), credentialString(credential, "user", "username"))
+	cfg.Passwd = firstNonEmptyNode(stringParam(params, "password"), credentialString(credential, "password"))
 	cfg.Net = "tcp"
 	cfg.Addr = fmt.Sprintf("%s:%d", host, port)
-	cfg.DBName = stringParam(params, "database", "db")
+	cfg.DBName = firstNonEmptyNode(stringParam(params, "database", "db"), credentialString(credential, "database", "db"))
 	cfg.ParseTime = true
 	cfg.Loc = location
 	cfg.Params = map[string]string{"charset": charset}
-	if collation := stringParam(params, "collation"); collation != "" {
+	if collation := firstNonEmptyNode(stringParam(params, "collation"), credentialString(credential, "collation")); collation != "" {
 		cfg.Collation = collation
 	}
-	timeoutMS := intParam(params, "connectTimeout", intParam(params, "connectionTimeout", 10000))
+	timeoutMS := intParam(params, "connectTimeout", intParam(params, "connectionTimeout", intParam(credential, "connectTimeout", intParam(credential, "connectionTimeout", 10000))))
 	if timeoutMS <= 0 {
 		timeoutMS = 10000
 	}
 	cfg.Timeout = time.Duration(timeoutMS) * time.Millisecond
 	cfg.ReadTimeout = 30 * time.Second
 	cfg.WriteTimeout = 30 * time.Second
-	cfg.AllowCleartextPasswords = boolParam(params, "allowCleartextPasswords", false)
-	ssl := stringParam(params, "ssl")
+	cfg.AllowCleartextPasswords = boolParam(params, "allowCleartextPasswords", boolParam(credential, "allowCleartextPasswords", false))
+	ssl := firstNonEmptyNode(stringParam(params, "ssl"), credentialString(credential, "ssl"))
 	switch ssl {
 	case "true", "require":
 		cfg.TLSConfig = "true"

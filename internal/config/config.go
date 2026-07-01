@@ -76,7 +76,6 @@ type ExecutionConfig struct {
 	DispatcherRedisAddr         string
 	DispatcherRedisPassword     string
 	DispatcherRedisDB           int
-	DispatcherNATSURL           string
 	DispatcherStream            string
 	DispatcherConsumer          string
 }
@@ -165,7 +164,6 @@ func Load() (Config, error) {
 			DispatcherRedisAddr:         dispatcherRedisAddr,
 			DispatcherRedisPassword:     firstNonEmpty(os.Getenv("N8N_TURBO_EXECUTION_REDIS_PASSWORD"), os.Getenv("QUEUE_BULL_REDIS_PASSWORD")),
 			DispatcherRedisDB:           envIntFirst([]string{"N8N_TURBO_EXECUTION_REDIS_DB", "QUEUE_BULL_REDIS_DB"}, 0),
-			DispatcherNATSURL:           firstNonEmpty(os.Getenv("N8N_TURBO_EXECUTION_NATS_URL"), "nats://127.0.0.1:4222"),
 			DispatcherStream:            firstNonEmpty(os.Getenv("N8N_TURBO_EXECUTION_STREAM"), "n8n:executions"),
 			DispatcherConsumer:          firstNonEmpty(os.Getenv("N8N_TURBO_EXECUTION_CONSUMER"), "n8n-turbo-worker"),
 		},
@@ -202,10 +200,6 @@ func Load() (Config, error) {
 	case "redis":
 		if strings.TrimSpace(cfg.Execution.DispatcherRedisAddr) == "" {
 			return Config{}, fmt.Errorf("redis execution dispatcher requires N8N_TURBO_EXECUTION_REDIS_ADDR or QUEUE_BULL_REDIS_HOST")
-		}
-	case "nats":
-		if strings.TrimSpace(cfg.Execution.DispatcherNATSURL) == "" {
-			return Config{}, fmt.Errorf("nats execution dispatcher requires N8N_TURBO_EXECUTION_NATS_URL")
 		}
 	default:
 		return Config{}, fmt.Errorf("unsupported N8N_TURBO_EXECUTION_DISPATCHER %q", cfg.Execution.DispatcherMode)
@@ -335,6 +329,8 @@ func firstNonEmpty(values ...string) string {
 func defaultFrontendDir() string {
 	candidates := []string{
 		filepath.Clean("./ui"),
+		filepath.Clean("../n8n-master/packages/editor-ui/dist"),
+		filepath.Clean("n8n-master/packages/editor-ui/dist"),
 	}
 	for _, candidate := range candidates {
 		if _, err := os.Stat(filepath.Join(candidate, "index.html")); err == nil {

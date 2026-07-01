@@ -17,6 +17,7 @@ func (s *Server) pushNodeAfter(event engine.NodeAfterEvent) {
 		return
 	}
 	s.pushHub.BroadcastToExecution(event.ExecutionID, push.NodeExecuteAfter(event.ExecutionID, event.WorkflowID, event.NodeName, event.Status, event.TaskData))
+	s.pushHub.BroadcastToExecution(event.ExecutionID, push.NodeExecuteAfterData(event.ExecutionID, event.WorkflowID, event.NodeName, event.TaskData))
 }
 
 func (s *Server) pushNodeAfterToSession(sessionID string, event engine.NodeAfterEvent) {
@@ -26,9 +27,11 @@ func (s *Server) pushNodeAfterToSession(sessionID string, event engine.NodeAfter
 	message := push.NodeExecuteAfter(event.ExecutionID, event.WorkflowID, event.NodeName, event.Status, event.TaskData)
 	if sessionID == "" {
 		s.pushHub.BroadcastToExecution(event.ExecutionID, message)
+		s.pushHub.BroadcastToExecution(event.ExecutionID, push.NodeExecuteAfterData(event.ExecutionID, event.WorkflowID, event.NodeName, event.TaskData))
 		return
 	}
 	s.pushHub.BroadcastToSession(sessionID, message)
+	s.pushHub.BroadcastToSession(sessionID, push.NodeExecuteAfterData(event.ExecutionID, event.WorkflowID, event.NodeName, event.TaskData))
 }
 
 func (s *Server) pushExecutionFinished(event engine.ExecutionFinishedEvent) {
@@ -36,6 +39,18 @@ func (s *Server) pushExecutionFinished(event engine.ExecutionFinishedEvent) {
 		return
 	}
 	s.pushHub.Publish(push.ExecutionFinished(event.ExecutionID, event.WorkflowID, event.Status, event.RunData, event.StoppedAt))
+}
+
+func (s *Server) pushExecutionFinishedToSession(sessionID string, event engine.ExecutionFinishedEvent) {
+	if s.pushHub == nil {
+		return
+	}
+	message := push.ExecutionFinished(event.ExecutionID, event.WorkflowID, event.Status, event.RunData, event.StoppedAt)
+	if sessionID == "" {
+		s.pushHub.Publish(message)
+		return
+	}
+	s.pushHub.BroadcastToSession(sessionID, message)
 }
 
 func (s *Server) pushWorkflowActivated(workflowID string, workflowName string) {

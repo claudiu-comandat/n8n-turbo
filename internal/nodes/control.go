@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
@@ -110,21 +111,21 @@ func executeLoopBatch(ctx context.Context, in engine.ExecuteInput) (dataplane.Ou
 		if done {
 			original := state.LazyCSV.OriginalItems
 			defaultLoopStateStore.Delete(key)
-			return dataplane.Output{[]dataplane.Item{}, original}, nil
+			return dataplane.Output{original, []dataplane.Item{}}, nil
 		}
 		defaultLoopStateStore.Set(key, state)
-		return dataplane.Output{batch, []dataplane.Item{}}, nil
+		return dataplane.Output{[]dataplane.Item{}, batch}, nil
 	}
 	if len(state.AllItems) == 0 || state.CurrentIndex >= len(state.AllItems) {
 		defaultLoopStateStore.Delete(key)
-		return dataplane.Output{[]dataplane.Item{}, state.AllItems}, nil
+		return dataplane.Output{state.AllItems, []dataplane.Item{}}, nil
 	}
 	end := state.CurrentIndex + state.BatchSize
 	if end > len(state.AllItems) {
 		end = len(state.AllItems)
 	}
 	defaultLoopStateStore.Set(key, state)
-	return dataplane.Output{cloneItems(state.AllItems[state.CurrentIndex:end]), []dataplane.Item{}}, nil
+	return dataplane.Output{[]dataplane.Item{}, cloneItems(state.AllItems[state.CurrentIndex:end])}, nil
 }
 
 type loopBatchParams struct {
@@ -282,7 +283,7 @@ func (s *lazyCSVLoopState) NextBatch(ctx context.Context, batchSize int) ([]data
 		if entry == nil {
 			continue
 		}
-		batch = append(batch, extractedRowItem(source.SourceItem, source.SourceItemIndex, entry, source.Params.includeInputFields))
+		batch = append(batch, extractedRowItem(source.SourceItem, source.SourceItemIndex, entry, source.Params))
 	}
 	if len(batch) == 0 {
 		return nil, true, nil
@@ -317,7 +318,7 @@ func waitResumeAt(params map[string]any, now time.Time) (time.Time, string, erro
 	}
 	switch resume {
 	case "timeInterval", "afterTimeInterval", "after":
-		duration, err := waitDuration(intParam(params, "amount", 1), stringParam(params, "unit"))
+		duration, err := waitDuration(waitNumberParam(params, "amount", 1), stringParam(params, "unit"))
 		if err != nil {
 			return time.Time{}, "", err
 		}
@@ -357,36 +358,70 @@ func externalWaitResumeAt(params map[string]any, now time.Time) time.Time {
 			return parsed.UTC()
 		}
 	}
-	amount := intParam(params, "limitAmount", intParam(params, "resumeAmount", 1))
+	amount := waitNumberParam(params, "limitAmount", waitNumberParam(params, "resumeAmount", 1))
 	unit := stringParam(params, "limitUnit")
 	if unit == "" {
 		unit = stringParam(params, "resumeUnit")
 	}
-	duration, err := waitDuration(amount, unit)
+	duration, err := waitLimitDuration(amount, unit)
 	if err != nil {
 		return time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)
 	}
 	return now.Add(duration)
 }
 
-func waitDuration(amount int, unit string) (time.Duration, error) {
-	if amount <= 0 {
-		amount = 1
+func waitNumberParam(params map[string]any, key string, fallback float64) float64 {
+	value, ok := params[key]
+	if !ok {
+		return fallback
+	}
+	switch typed := value.(type) {
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case string:
+		parsed, err := strconv.ParseFloat(typed, 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func waitDuration(amount float64, unit string) (time.Duration, error) {
+	if amount < 0 {
+		return 0, fmt.Errorf("invalid wait amount %v", amount)
 	}
 	switch unit {
-	case "", "second", "seconds":
-		return time.Duration(amount) * time.Second, nil
-	case "millisecond", "milliseconds":
-		return time.Duration(amount) * time.Millisecond, nil
-	case "minute", "minutes":
-		return time.Duration(amount) * time.Minute, nil
-	case "hour", "hours":
-		return time.Duration(amount) * time.Hour, nil
-	case "day", "days":
-		return time.Duration(amount) * 24 * time.Hour, nil
-	case "week", "weeks":
-		return time.Duration(amount) * 7 * 24 * time.Hour, nil
+	case "seconds":
+		return time.Duration(amount * float64(time.Second)), nil
+	case "minutes":
+		return time.Duration(amount * float64(time.Minute)), nil
+	case "hours":
+		return time.Duration(amount * float64(time.Hour)), nil
+	case "days":
+		return time.Duration(amount * float64(24*time.Hour)), nil
 	default:
 		return 0, fmt.Errorf("unsupported wait unit %s", unit)
 	}
+}
+
+func waitLimitDuration(amount float64, unit string) (time.Duration, error) {
+	if amount < 0 {
+		return 0, fmt.Errorf("invalid wait amount %v", amount)
+	}
+	switch unit {
+	case "minutes":
+		amount *= 60
+	case "hours":
+		amount *= 60 * 60
+	case "days":
+		amount *= 60 * 60 * 24
+	}
+	return time.Duration(amount * float64(time.Second)), nil
 }

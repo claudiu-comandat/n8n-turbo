@@ -10,7 +10,7 @@ import (
 
 func (n *Node) handleMessage(ctx context.Context, cred *Credential, operation string, params map[string]any, item dataplane.Item) ([]dataplane.Item, error) {
 	switch operation {
-	case "send", "sendChannelMessage":
+	case "send", "create", "sendChannelMessage":
 		return single(n.sendChannelMessage(ctx, cred, params))
 	case "reply":
 		return single(n.replyToMessage(ctx, cred, params))
@@ -24,6 +24,28 @@ func (n *Node) handleMessage(ctx context.Context, cred *Credential, operation st
 		return single(n.sendDirectMessage(ctx, cred, params))
 	default:
 		return nil, fmt.Errorf("unknown message operation %s", operation)
+	}
+}
+
+func (n *Node) handleChatMessage(ctx context.Context, cred *Credential, operation string, params map[string]any) ([]dataplane.Item, error) {
+	switch operation {
+	case "create", "send", "sendAndWait":
+		return single(n.sendChatMessage(ctx, cred, params))
+	case "get":
+		chatID := stringValue(params, "chatId")
+		messageID := stringValue(params, "messageId")
+		if chatID == "" || messageID == "" {
+			return nil, fmt.Errorf("chatId and messageId are required")
+		}
+		return single(n.doJSON(ctx, cred, http.MethodGet, fmt.Sprintf("/chats/%s/messages/%s", chatID, messageID), nil))
+	case "getAll", "list":
+		chatID := stringValue(params, "chatId")
+		if chatID == "" {
+			return nil, fmt.Errorf("chatId is required")
+		}
+		return itemsFromValue(n.doJSON(ctx, cred, http.MethodGet, fmt.Sprintf("/chats/%s/messages", chatID), nil))
+	default:
+		return nil, fmt.Errorf("unknown chatMessage operation %s", operation)
 	}
 }
 
@@ -59,7 +81,22 @@ func (n *Node) sendChannelMessage(ctx context.Context, cred *Credential, params 
 	if err != nil {
 		return nil, err
 	}
+	if replyID := stringValue(mapParam(params, "options"), "makeReply"); replyID != "" {
+		return n.doJSON(ctx, cred, http.MethodPost, fmt.Sprintf("/teams/%s/channels/%s/messages/%s/replies", teamID, channelID, replyID), body)
+	}
 	return n.doJSON(ctx, cred, http.MethodPost, fmt.Sprintf("/teams/%s/channels/%s/messages", teamID, channelID), body)
+}
+
+func (n *Node) sendChatMessage(ctx context.Context, cred *Credential, params map[string]any) (map[string]any, error) {
+	chatID := stringValue(params, "chatId")
+	if chatID == "" {
+		return nil, fmt.Errorf("chatId is required")
+	}
+	body, err := messageBody(params)
+	if err != nil {
+		return nil, err
+	}
+	return n.doJSON(ctx, cred, http.MethodPost, fmt.Sprintf("/chats/%s/messages", chatID), body)
 }
 
 func (n *Node) replyToMessage(ctx context.Context, cred *Credential, params map[string]any) (map[string]any, error) {

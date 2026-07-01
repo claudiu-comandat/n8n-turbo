@@ -12,7 +12,7 @@ import (
 func (n *Node) handleCard(ctx context.Context, cred Credential, operation string, params map[string]any, item dataplane.Item) ([]dataplane.Item, error) {
 	switch operation {
 	case "get":
-		cardID := stringValue(params, "cardId")
+		cardID := stringValue(params, "cardId", "id")
 		if cardID == "" {
 			return nil, fmt.Errorf("cardId is required")
 		}
@@ -39,7 +39,7 @@ func (n *Node) handleCard(ctx context.Context, cred Credential, operation string
 	case "update":
 		return single(n.updateCard(ctx, cred, params))
 	case "delete":
-		cardID := stringValue(params, "cardId")
+		cardID := stringValue(params, "cardId", "id")
 		if cardID == "" {
 			return nil, fmt.Errorf("cardId is required")
 		}
@@ -48,7 +48,7 @@ func (n *Node) handleCard(ctx context.Context, cred Credential, operation string
 	case "move":
 		return single(n.moveCard(ctx, cred, params))
 	case "archive":
-		cardID := stringValue(params, "cardId")
+		cardID := stringValue(params, "cardId", "id")
 		if cardID == "" {
 			return nil, fmt.Errorf("cardId is required")
 		}
@@ -59,8 +59,8 @@ func (n *Node) handleCard(ctx context.Context, cred Credential, operation string
 }
 
 func (n *Node) listCards(ctx context.Context, cred Credential, params map[string]any) ([]dataplane.Item, error) {
-	listID := stringValue(params, "listId")
-	boardID := stringValue(params, "boardId")
+	listID := stringValue(params, "listId", "idList")
+	boardID := stringValue(params, "boardId", "idBoard")
 	if listID == "" && boardID == "" {
 		return nil, fmt.Errorf("either listId or boardId is required")
 	}
@@ -103,7 +103,7 @@ func (n *Node) createCard(ctx context.Context, cred Credential, params map[strin
 }
 
 func (n *Node) updateCard(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
-	cardID := stringValue(params, "cardId")
+	cardID := stringValue(params, "cardId", "id")
 	if cardID == "" {
 		return nil, fmt.Errorf("cardId is required")
 	}
@@ -122,8 +122,8 @@ func (n *Node) updateCard(ctx context.Context, cred Credential, params map[strin
 }
 
 func (n *Node) moveCard(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
-	cardID := stringValue(params, "cardId")
-	newListID := stringValue(params, "newListId")
+	cardID := stringValue(params, "cardId", "id")
+	newListID := stringValue(params, "newListId", "idList")
 	if cardID == "" || newListID == "" {
 		return nil, fmt.Errorf("cardId and newListId are required")
 	}

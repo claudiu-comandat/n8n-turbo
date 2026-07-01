@@ -15,12 +15,16 @@ func NodeTypes(known []string) []NodeType {
 	for _, desc := range descriptor.Builtins() {
 		byName[desc.NodeType] = descriptorNodeType(desc)
 	}
+	original := originalNodeDescriptions()
 	for _, name := range known {
 		if _, ok := byName[name]; ok {
 			continue
 		}
-		byName[name] = genericNodeType(name)
+		if _, ok := original[name]; ok {
+			byName[name] = genericNodeType(name)
+		}
 	}
+	applyOriginalNodeDescriptions(byName)
 	result := make([]NodeType, 0, len(byName))
 	for _, node := range byName {
 		result = append(result, node)
@@ -38,10 +42,262 @@ func NodeTypeByName(name string, known []string) (NodeType, bool) {
 	return NodeType{}, false
 }
 
+func applyOriginalNodeDescriptions(byName map[string]NodeType) {
+	for name, raw := range originalNodeDescriptions() {
+		node, ok := byName[name]
+		if !ok {
+			continue
+		}
+		raw = cloneRawMap(raw)
+		applyIconURL(raw, name)
+		applyNodeMetadataCompat(raw, name)
+		node.Raw = raw
+		byName[name] = node
+	}
+}
+
+func applyNodeMetadataCompat(raw map[string]any, name string) {
+	if name == "n8n-nodes-base.n8n" {
+		ensureProperty(raw, map[string]any{
+			"displayName": "Request Options",
+			"name":        "requestOptions",
+			"type":        "collection",
+			"default":     map[string]any{},
+			"placeholder": "Add option",
+			"options":     []any{},
+		})
+	}
+	if name == "n8n-nodes-base.webhook" {
+		ensureCollectionOption(raw, "options", map[string]any{
+			"displayName": "Allowed Origins (CORS)",
+			"name":        "allowedOrigins",
+			"type":        "string",
+			"default":     "*",
+			"description": "Comma-separated list of URLs allowed for cross-origin non-preflight requests. Use * (default) to allow all origins.",
+		})
+	}
+	if name == "n8n-nodes-base.filter" {
+		raw["version"] = []any{1, 2, 2.1, 2.2, 2.3}
+		showPropertyForVersion(raw, "conditions", "filter", map[string]any{"@version": []any{map[string]any{"_cnd": map[string]any{"gte": 2}}}})
+		showPropertyForVersion(raw, "options", "collection", map[string]any{"@version": []any{map[string]any{"_cnd": map[string]any{"gte": 2}}}})
+		ensureVersionedProperty(raw, filterV1ConditionsProperty())
+		ensureVersionedProperty(raw, filterV1CombineConditionsProperty())
+	}
+	if name == "@n8n/n8n-nodes-langchain.agent" {
+		raw["version"] = []any{2, 2.1, 2.2, 3, 3.1}
+	}
+}
+
+func ensureProperty(raw map[string]any, property map[string]any) {
+	name, _ := property["name"].(string)
+	if name == "" {
+		return
+	}
+	properties, _ := raw["properties"].([]any)
+	for _, entry := range properties {
+		object, ok := entry.(map[string]any)
+		if ok && object["name"] == name {
+			return
+		}
+	}
+	raw["properties"] = append(properties, property)
+}
+
+func showPropertyForVersion(raw map[string]any, name string, propertyType string, show map[string]any) {
+	properties, _ := raw["properties"].([]any)
+	for _, entry := range properties {
+		property, ok := entry.(map[string]any)
+		if !ok || property["name"] != name || property["type"] != propertyType {
+			continue
+		}
+		if _, exists := property["displayOptions"]; exists {
+			return
+		}
+		property["displayOptions"] = map[string]any{"show": show}
+		return
+	}
+}
+
+func ensureVersionedProperty(raw map[string]any, property map[string]any) {
+	name, _ := property["name"].(string)
+	propertyType, _ := property["type"].(string)
+	if name == "" || propertyType == "" {
+		return
+	}
+	properties, _ := raw["properties"].([]any)
+	for _, entry := range properties {
+		existing, ok := entry.(map[string]any)
+		if ok && existing["name"] == name && existing["type"] == propertyType {
+			return
+		}
+	}
+	raw["properties"] = append([]any{property}, properties...)
+}
+
+func ensureCollectionOption(raw map[string]any, collectionName string, option map[string]any) {
+	optionName, _ := option["name"].(string)
+	if optionName == "" {
+		return
+	}
+	properties, _ := raw["properties"].([]any)
+	for _, entry := range properties {
+		collection, ok := entry.(map[string]any)
+		if !ok || collection["name"] != collectionName {
+			continue
+		}
+		options, _ := collection["options"].([]any)
+		for _, existing := range options {
+			existingOption, ok := existing.(map[string]any)
+			if ok && existingOption["name"] == optionName {
+				return
+			}
+		}
+		collection["options"] = append([]any{option}, options...)
+		return
+	}
+}
+
+func filterV1ConditionsProperty() map[string]any {
+	return map[string]any{
+		"displayName": "Conditions",
+		"name":        "conditions",
+		"placeholder": "Add Condition",
+		"type":        "fixedCollection",
+		"typeOptions": map[string]any{"multipleValues": true, "sortable": true},
+		"description": "The type of values to compare",
+		"default":     map[string]any{},
+		"displayOptions": map[string]any{
+			"show": map[string]any{"@version": []any{1}},
+		},
+		"options": []any{
+			map[string]any{
+				"name":        "string",
+				"displayName": "String",
+				"values": []any{
+					map[string]any{"displayName": "Value 1", "name": "value1", "type": "string", "default": "", "description": "The value to compare with the second one"},
+					map[string]any{
+						"displayName":      "Operation",
+						"name":             "operation",
+						"type":             "options",
+						"noDataExpression": true,
+						"default":          "equal",
+						"description":      "Operation to decide where the data should be mapped to",
+						"options": []any{
+							map[string]any{"name": "Contains", "value": "contains"},
+							map[string]any{"name": "Not Contains", "value": "notContains"},
+							map[string]any{"name": "Ends With", "value": "endsWith"},
+							map[string]any{"name": "Not Ends With", "value": "notEndsWith"},
+							map[string]any{"name": "Equal", "value": "equal"},
+							map[string]any{"name": "Not Equal", "value": "notEqual"},
+							map[string]any{"name": "Regex Match", "value": "regex"},
+							map[string]any{"name": "Regex Not Match", "value": "notRegex"},
+							map[string]any{"name": "Starts With", "value": "startsWith"},
+							map[string]any{"name": "Not Starts With", "value": "notStartsWith"},
+							map[string]any{"name": "Is Empty", "value": "isEmpty"},
+							map[string]any{"name": "Is Not Empty", "value": "isNotEmpty"},
+						},
+					},
+					map[string]any{
+						"displayName":    "Value 2",
+						"name":           "value2",
+						"type":           "string",
+						"default":        "",
+						"description":    "The value to compare with the first one",
+						"displayOptions": map[string]any{"hide": map[string]any{"operation": []any{"isEmpty", "isNotEmpty", "regex", "notRegex"}}},
+					},
+					map[string]any{
+						"displayName":    "Regex",
+						"name":           "value2",
+						"type":           "string",
+						"default":        "",
+						"placeholder":    "/text/i",
+						"description":    "The regex which has to match",
+						"displayOptions": map[string]any{"show": map[string]any{"operation": []any{"regex", "notRegex"}}},
+					},
+				},
+			},
+		},
+	}
+}
+
+func filterV1CombineConditionsProperty() map[string]any {
+	return map[string]any{
+		"displayName": "Combine Conditions",
+		"name":        "combineConditions",
+		"type":        "options",
+		"default":     "AND",
+		"description": "How to combine the conditions: AND requires all conditions to be true, OR requires at least one condition to be true",
+		"displayOptions": map[string]any{
+			"show": map[string]any{"@version": []any{1}},
+		},
+		"options": []any{
+			map[string]any{"name": "AND", "description": "Items are passed to the next node only if they meet all the conditions", "value": "AND"},
+			map[string]any{"name": "OR", "description": "Items are passed to the next node if they meet at least one condition", "value": "OR"},
+		},
+	}
+}
+
+func cloneRawMap(raw map[string]any) map[string]any {
+	cloned := make(map[string]any, len(raw))
+	for key, value := range raw {
+		cloned[key] = cloneRawValue(value)
+	}
+	return cloned
+}
+
+func cloneRawValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneRawMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for index, entry := range typed {
+			cloned[index] = cloneRawValue(entry)
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+func applyIconURL(raw map[string]any, nodeName string) {
+	if iconURL, ok := raw["iconUrl"].(string); ok {
+		raw["iconUrl"] = strings.TrimPrefix(iconURL, "/")
+		return
+	}
+	icon := iconFileName(raw["icon"])
+	if icon == "" {
+		return
+	}
+	raw["iconUrl"] = nodeIconURL(nodeName, icon)
+}
+
+func iconFileName(value any) string {
+	switch typed := value.(type) {
+	case string:
+		if !strings.HasPrefix(typed, "file:") {
+			return ""
+		}
+		return strings.TrimPrefix(typed, "file:")
+	case map[string]any:
+		if light := iconFileName(typed["light"]); light != "" {
+			return light
+		}
+		return iconFileName(typed["dark"])
+	default:
+		return ""
+	}
+}
+
+func nodeIconURL(nodeName string, icon string) string {
+	return builtinNodeIconURL(nodeName, "file:"+icon)
+}
+
 func builtinNodeTypes() []NodeType {
 	return []NodeType{
 		trigger("n8n-nodes-base.manualTrigger", "Manual Trigger", "Runs the workflow manually", "manualTrigger"),
 		trigger("n8n-nodes-base.start", "Start", "Legacy manual start node", "manualTrigger"),
+		stickyNoteNode(),
 		trigger("n8n-nodes-base.webhook", "Webhook", "Starts the workflow from an HTTP request", "webhook",
 			option("HTTP Method", "httpMethod", "options", "GET", options("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD")),
 			textPlaceholder("Path", "path", "", "webhook"),
@@ -343,25 +599,11 @@ func builtinNodeTypes() []NodeType {
 			option("Indent", "indent", "boolean", false, nil),
 			option("Wrap In Array", "wrapInArray", "boolean", true, nil)),
 		action("n8n-nodes-base.httpRequest", "HTTP Request", "Makes HTTP requests", "action", httpRequestProps()...).withVersions(1, 2, 3, 4, 4.1, 4.2, 4.3, 4.4).withCredentialDisplay("httpSslAuth", true, "provideSslCertificates", true),
-		action("n8n-nodes-base.sqlite", "SQLite", "Runs queries against a SQLite database", "database",
-			selectProp("Operation", "operation", "executeQuery", []Option{{Name: "Execute Query", Value: "executeQuery"}, {Name: "Insert", Value: "insert"}, {Name: "Update", Value: "update"}, {Name: "Delete", Value: "delete"}, {Name: "Select", Value: "select"}}),
-			text("Database Path", "database", ":memory:"),
-			option("Read Only", "readOnly", "boolean", false, nil),
-			option("WAL Mode", "walMode", "boolean", false, nil),
-			numberProp("Busy Timeout", "busyTimeout", 5000),
-			textArea("Query", "query", "SELECT 1"),
-			text("Table", "table", ""),
-			text("Columns", "columns", ""),
-			text("Return Fields", "returnFields", ""),
-			text("Where", "where", ""),
-			numberProp("Limit", "limit", 50),
-			numberProp("Offset", "offset", 0),
-			fixedCollection("Query Parameters", "queryParams", []Property{text("Value", "value", "")}),
-			fixedCollection("Additional Fields", "additionalFields", []Property{
-				selectProp("Query Batching", "queryBatching", "independently", []Option{{Name: "Independently", Value: "independently"}, {Name: "Transaction", Value: "transaction"}, {Name: "Single Query", Value: "singleQuery"}}),
-				option("Return ID", "returnId", "boolean", false, nil),
-				text("Output Columns", "outputColumns", ""),
-			})),
+		n8nNode(),
+		aiAgentNode(),
+		googleGeminiChatModelNode(),
+		deepSeekChatModelNode(),
+		openRouterChatModelNode(),
 		sqlNode("n8n-nodes-base.postgres", "Postgres", "postgres"),
 		sqlNode("n8n-nodes-base.mySql", "MySQL", "mySql"),
 		action("n8n-nodes-base.redis", "Redis", "Reads and writes Redis data", "database",
@@ -622,9 +864,20 @@ func firstNonEmptyText(values ...string) string {
 
 func genericNodeType(name string) NodeType {
 	display := strings.TrimPrefix(name, "n8n-nodes-base.")
-	node := action(name, title(display), "Registered node", "action")
-	node.Codex = codexForCategory("utility", node.DocumentationURL)
-	return node
+	return NodeType{
+		Name:             name,
+		DisplayName:      title(display),
+		Description:      "Registered node",
+		Version:          1,
+		Subtitle:         "={{$parameter.operation || ''}}",
+		Defaults:         NodeDefaults{Name: title(display), Color: "#4467ff"},
+		Inputs:           []string{"main"},
+		Outputs:          []string{"main"},
+		Group:            []string{"transform"},
+		Category:         "utility",
+		DocumentationURL: "https://docs.n8n.io/integrations/builtin/core-nodes/" + strings.TrimPrefix(name, "n8n-nodes-base."),
+		Codex:            codexForCategory("utility", "https://docs.n8n.io/integrations/builtin/core-nodes/"+strings.TrimPrefix(name, "n8n-nodes-base.")),
+	}
 }
 
 func builtinNodeIcon(name string, fallback string) string {
@@ -666,7 +919,6 @@ func builtinNodeIcon(name string, fallback string) string {
 		"n8n-nodes-base.sort":                   "node:sort",
 		"n8n-nodes-base.splitInBatches":         "node:loop-over-items",
 		"n8n-nodes-base.splitOut":               "node:split-out",
-		"n8n-nodes-base.sqlite":                 "fa:database",
 		"n8n-nodes-base.summarize":              "node:summarize",
 		"n8n-nodes-base.switch":                 "node:switch",
 		"n8n-nodes-base.wait":                   "node:wait",
@@ -679,21 +931,570 @@ func builtinNodeIcon(name string, fallback string) string {
 		return fallback
 	}
 	if fallback == "" {
-		return "fa:circle"
+		return ""
 	}
 	return "fa:" + fallback
 }
 
-func builtinNodeIconURL(name string) string {
+func builtinNodeIconURL(name string, icon string) string {
 	if iconURL, ok := map[string]string{
-		"n8n-nodes-base.mongoDb":  "icons/n8n-nodes-base/dist/nodes/MongoDb/mongodb.svg",
-		"n8n-nodes-base.mySql":    "icons/n8n-nodes-base/dist/nodes/MySql/mysql.svg",
-		"n8n-nodes-base.postgres": "icons/n8n-nodes-base/dist/nodes/Postgres/postgres.svg",
-		"n8n-nodes-base.redis":    "icons/n8n-nodes-base/dist/nodes/Redis/redis.svg",
+		"@n8n/n8n-nodes-langchain.lmChatDeepSeek":     "icons/@n8n/n8n-nodes-langchain/dist/nodes/llms/LmChatDeepSeek/deepseek.svg",
+		"@n8n/n8n-nodes-langchain.lmChatGoogleGemini": "icons/@n8n/n8n-nodes-langchain/dist/nodes/llms/LmChatGoogleGemini/google.svg",
+		"@n8n/n8n-nodes-langchain.lmChatOpenRouter":   "icons/@n8n/n8n-nodes-langchain/dist/nodes/llms/LmChatOpenRouter/openrouter.svg",
+		"n8n-nodes-base.aggregate":                    "icons/n8n-nodes-base/dist/nodes/Transform/Aggregate/aggregate.svg",
+		"n8n-nodes-base.n8n":                          "icons/n8n-nodes-base/dist/nodes/N8n/n8n.svg",
+		"n8n-nodes-base.airtable":                     "icons/n8n-nodes-base/dist/nodes/Airtable/airtable.svg",
+		"n8n-nodes-base.code":                         "icons/n8n-nodes-base/dist/nodes/Code/code.svg",
+		"n8n-nodes-base.convertToFile":                "icons/n8n-nodes-base/dist/nodes/Files/ConvertToFile/convertToFile.svg",
+		"n8n-nodes-base.discord":                      "icons/n8n-nodes-base/dist/nodes/Discord/discord.svg",
+		"n8n-nodes-base.extractFromFile":              "icons/n8n-nodes-base/dist/nodes/Files/ExtractFromFile/extractFromFile.svg",
+		"n8n-nodes-base.formTrigger":                  "icons/n8n-nodes-base/dist/nodes/Form/form.svg",
+		"n8n-nodes-base.github":                       "icons/n8n-nodes-base/dist/nodes/Github/github.svg",
+		"n8n-nodes-base.gmail":                        "icons/n8n-nodes-base/dist/nodes/Google/Gmail/gmail.svg",
+		"n8n-nodes-base.googleSheets":                 "icons/n8n-nodes-base/dist/nodes/Google/Sheet/googleSheets.svg",
+		"n8n-nodes-base.html":                         "icons/n8n-nodes-base/dist/nodes/Html/html.svg",
+		"n8n-nodes-base.hubspot":                      "icons/n8n-nodes-base/dist/nodes/Hubspot/hubspot.svg",
+		"n8n-nodes-base.httpRequest":                  "icons/n8n-nodes-base/dist/nodes/HttpRequest/httprequest.svg",
+		"n8n-nodes-base.jira":                         "icons/n8n-nodes-base/dist/nodes/Jira/jira.svg",
+		"n8n-nodes-base.limit":                        "icons/n8n-nodes-base/dist/nodes/Transform/Limit/limit.svg",
+		"n8n-nodes-base.markdown":                     "icons/n8n-nodes-base/dist/nodes/Markdown/markdown.svg",
+		"n8n-nodes-base.merge":                        "icons/n8n-nodes-base/dist/nodes/Merge/merge.svg",
+		"n8n-nodes-base.microsoftTeams":               "icons/n8n-nodes-base/dist/nodes/Microsoft/Teams/teams.svg",
+		"n8n-nodes-base.mongoDb":                      "icons/n8n-nodes-base/dist/nodes/MongoDb/mongodb.svg",
+		"n8n-nodes-base.mySql":                        "icons/n8n-nodes-base/dist/nodes/MySql/mysql.svg",
+		"n8n-nodes-base.notion":                       "icons/n8n-nodes-base/dist/nodes/Notion/notion.svg",
+		"n8n-nodes-base.openAi":                       "icons/n8n-nodes-base/dist/nodes/OpenAi/openAi.svg",
+		"n8n-nodes-base.postgres":                     "icons/n8n-nodes-base/dist/nodes/Postgres/postgres.svg",
+		"n8n-nodes-base.readWriteFile":                "icons/n8n-nodes-base/dist/nodes/Files/ReadWriteFile/readWriteFile.svg",
+		"n8n-nodes-base.redis":                        "icons/n8n-nodes-base/dist/nodes/Redis/redis.svg",
+		"n8n-nodes-base.removeDuplicates":             "icons/n8n-nodes-base/dist/nodes/Transform/RemoveDuplicates/removeDuplicates.svg",
+		"n8n-nodes-base.respondToWebhook":             "icons/n8n-nodes-base/dist/nodes/RespondToWebhook/webhook.svg",
+		"n8n-nodes-base.sendGrid":                     "icons/n8n-nodes-base/dist/nodes/SendGrid/sendGrid.svg",
+		"n8n-nodes-base.shopify":                      "icons/n8n-nodes-base/dist/nodes/Shopify/shopify.svg",
+		"n8n-nodes-base.slack":                        "icons/n8n-nodes-base/dist/nodes/Slack/slack.svg",
+		"n8n-nodes-base.sort":                         "icons/n8n-nodes-base/dist/nodes/Transform/Sort/sort.svg",
+		"n8n-nodes-base.splitOut":                     "icons/n8n-nodes-base/dist/nodes/Transform/SplitOut/splitOut.svg",
+		"n8n-nodes-base.stripe":                       "icons/n8n-nodes-base/dist/nodes/Stripe/stripe.svg",
+		"n8n-nodes-base.summarize":                    "icons/n8n-nodes-base/dist/nodes/Transform/Summarize/summarize.svg",
+		"n8n-nodes-base.telegram":                     "icons/n8n-nodes-base/dist/nodes/Telegram/telegram.svg",
+		"n8n-nodes-base.trello":                       "icons/n8n-nodes-base/dist/nodes/Trello/trello.svg",
+		"n8n-nodes-base.twilio":                       "icons/n8n-nodes-base/dist/nodes/Twilio/twilio.svg",
+		"n8n-nodes-base.webhook":                      "icons/n8n-nodes-base/dist/nodes/Webhook/webhook.svg",
 	}[name]; ok {
 		return iconURL
 	}
 	return ""
+}
+
+func stickyNoteNode() NodeType {
+	node := base("n8n-nodes-base.stickyNote", "Sticky Note", "Adds a note to the canvas", []string{"transform"}, "utility", "node:n8n",
+		textArea("Content", "content", ""),
+	)
+	node.Inputs = []string{}
+	node.Outputs = []string{}
+	node.Subtitle = ""
+	node.DocumentationURL = "https://docs.n8n.io/workflows/components/sticky-notes/"
+	node.Codex = codexForCategory("utility", node.DocumentationURL)
+	return node
+}
+
+func n8nNode() NodeType {
+	workflowFilter := Property{
+		DisplayName: "Workflow",
+		Name:        "workflowId",
+		Type:        "resourceLocator",
+		Default:     map[string]any{"mode": "list", "value": ""},
+		Description: "Workflow to filter the executions by",
+		Modes: []ParameterMode{
+			{
+				DisplayName: "From List",
+				Name:        "list",
+				Type:        "list",
+				Placeholder: "Select a Workflow...",
+				TypeOptions: map[string]any{
+					"searchListMethod":     "searchWorkflows",
+					"searchFilterRequired": false,
+					"searchable":           true,
+				},
+			},
+			{
+				DisplayName: "By URL",
+				Name:        "url",
+				Type:        "string",
+				Placeholder: "https://myinstance.app.n8n.cloud/workflow/1",
+			},
+			{
+				DisplayName: "ID",
+				Name:        "id",
+				Type:        "string",
+				Placeholder: "1",
+			},
+		},
+		Routing: map[string]any{
+			"send": map[string]any{
+				"type":     "query",
+				"property": "workflowId",
+				"value":    "={{ $value || undefined }}",
+			},
+		},
+	}
+	filters := showProp(collection("Filters", "filters", []Property{
+		workflowFilter,
+		{
+			DisplayName: "Status",
+			Name:        "status",
+			Type:        "options",
+			Default:     "success",
+			Description: "Status to filter the executions by",
+			Options: []Option{
+				{Name: "Error", Value: "error"},
+				{Name: "Success", Value: "success"},
+				{Name: "Waiting", Value: "waiting"},
+			},
+			Routing: map[string]any{
+				"send": map[string]any{
+					"type":     "query",
+					"property": "status",
+					"value":    "={{ $value }}",
+				},
+			},
+		},
+	}), map[string][]any{"resource": []any{"execution"}, "operation": []any{"getAll"}})
+	filters.Placeholder = "Add Filter"
+	options := showProp(collection("Options", "options", []Property{
+		{
+			DisplayName: "Include Execution Details",
+			Name:        "activeWorkflows",
+			Type:        "boolean",
+			Default:     false,
+			Description: "Whether to include the detailed execution data",
+			Routing: map[string]any{
+				"send": map[string]any{
+					"type":     "query",
+					"property": "includeData",
+					"value":    "={{ $value }}",
+				},
+			},
+		},
+	}), map[string][]any{"resource": []any{"execution"}, "operation": []any{"getAll"}})
+	requestOptions := collection("Request Options", "requestOptions", []Property{})
+	node := base("n8n-nodes-base.n8n", "n8n", "Handle events and perform actions on your n8n instance", []string{"transform"}, "integration", "file:n8n.svg",
+		Property{
+			DisplayName:      "Resource",
+			Name:             "resource",
+			Type:             "options",
+			NoDataExpression: true,
+			Default:          "workflow",
+			Options: []Option{
+				{Name: "Audit", Value: "audit"},
+				{Name: "Credential", Value: "credential"},
+				{Name: "Execution", Value: "execution"},
+				{Name: "Workflow", Value: "workflow"},
+			},
+		},
+		showProp(selectProp("Operation", "operation", "getAll", []Option{
+			{Name: "Get", Value: "get", Action: "Get an execution"},
+			{Name: "Get Many", Value: "getAll", Action: "Get many executions"},
+			{Name: "Delete", Value: "delete", Action: "Delete an execution"},
+		}), map[string][]any{"resource": []any{"execution"}}),
+		showProp(text("Execution ID", "executionId", ""), map[string][]any{"resource": []any{"execution"}, "operation": []any{"get", "delete"}}),
+		showProp(option("Return All", "returnAll", "boolean", false, nil), map[string][]any{"resource": []any{"execution"}, "operation": []any{"getAll"}}),
+		showProp(numberProp("Limit", "limit", 100), map[string][]any{"resource": []any{"execution"}, "operation": []any{"getAll"}, "returnAll": []any{false}}),
+		filters,
+		options,
+		requestOptions,
+	)
+	node.Subtitle = `={{$parameter["operation"] + ": " + $parameter["resource"]}}`
+	node.Credentials = []CredentialUsage{{Name: "n8nApi", Required: true}}
+	node.RequestDefaults = map[string]any{
+		"returnFullResponse": true,
+		"baseURL":            `={{ $credentials.baseUrl.replace(new RegExp("/$"), "") }}`,
+		"headers": map[string]any{
+			"Accept":       "application/json",
+			"Content-Type": "application/json",
+		},
+	}
+	node.DocumentationURL = "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.n8n/"
+	node.Codex = codexForAppCategory("App Nodes", node.DocumentationURL)
+	return node
+}
+
+func aiAgentNode() NodeType {
+	node := base("@n8n/n8n-nodes-langchain.agent", "AI Agent", "Generates an action plan and executes it using connected AI tools", []string{"transform"}, "utility", "fa:robot",
+		Property{
+			DisplayName: "Tip: Get a feel for agents with our quick <a href=\"https://docs.n8n.io/advanced-ai/intro-tutorial/\" target=\"_blank\">tutorial</a> or see an <a href=\"/workflows/templates/1954\" target=\"_blank\">example</a> of how this node works",
+			Name:        "aiAgentStarterCallout",
+			Type:        "callout",
+			Default:     "",
+		},
+		Property{
+			DisplayName: "Source for Prompt (User Message)",
+			Name:        "promptType",
+			Type:        "options",
+			Default:     "auto",
+			Options: []Option{
+				{
+					Name:        "Connected Chat Trigger Node",
+					Value:       "auto",
+					Description: "Looks for an input field called 'chatInput' that is coming from a directly connected Chat Trigger",
+				},
+				{
+					Name:        "Connected Guardrails Node",
+					Value:       "guardrails",
+					Description: "Looks for an input field called 'guardrailsInput' that is coming from a directly connected Guardrails Node",
+				},
+				{
+					Name:        "Define below",
+					Value:       "define",
+					Description: "Use an expression to reference data in previous nodes or enter static text",
+				},
+			},
+			DisplayOptions: map[string]any{"show": map[string]any{"@version": []any{map[string]any{"_cnd": map[string]any{"lt": 3.1}}}}},
+		},
+		Property{
+			DisplayName: "Source for Prompt (User Message)",
+			Name:        "promptType",
+			Type:        "options",
+			Default:     "auto",
+			Options: []Option{
+				{
+					Name:        "Connected Chat Trigger Node",
+					Value:       "auto",
+					Description: "Looks for an input field called 'chatInput' that is coming from a directly connected Chat Trigger",
+				},
+				{
+					Name:        "Define below",
+					Value:       "define",
+					Description: "Use an expression to reference data in previous nodes or enter static text",
+				},
+			},
+			DisplayOptions: map[string]any{"show": map[string]any{"@version": []any{map[string]any{"_cnd": map[string]any{"gte": 3.1}}}}},
+		},
+		Property{
+			DisplayName: "Prompt (User Message)",
+			Name:        "text",
+			Type:        "string",
+			Default:     "={{ $json.guardrailsInput }}",
+			Required:    true,
+			TypeOptions: map[string]any{"rows": 2},
+			DisplayOptions: map[string]any{
+				"show": map[string][]any{
+					"promptType": []any{"guardrails"},
+				},
+			},
+		},
+		Property{
+			DisplayName: "Prompt (User Message)",
+			Name:        "text",
+			Type:        "string",
+			Default:     "={{ $json.chatInput }}",
+			Required:    true,
+			TypeOptions: map[string]any{"rows": 2},
+			DisplayOptions: map[string]any{
+				"show": map[string][]any{
+					"promptType": []any{"auto"},
+				},
+			},
+		},
+		Property{
+			DisplayName: "Prompt (User Message)",
+			Name:        "text",
+			Type:        "string",
+			Default:     "",
+			Required:    true,
+			Placeholder: "e.g. Hello, how can you help me?",
+			TypeOptions: map[string]any{"rows": 2},
+			DisplayOptions: map[string]any{
+				"show": map[string][]any{
+					"promptType": []any{"define"},
+				},
+			},
+		},
+		Property{
+			DisplayName:      "Require Specific Output Format",
+			Name:             "hasOutputParser",
+			Type:             "boolean",
+			Default:          false,
+			NoDataExpression: true,
+		},
+		option("Connect an <a data-action='openSelectiveNodeCreator' data-action-parameter-connectiontype='ai_outputParser'>output parser</a> on the canvas to specify the output format you require", "notice", "notice", "", nil),
+		Property{
+			DisplayName:      "Enable Fallback Model",
+			Name:             "needsFallback",
+			Type:             "boolean",
+			Default:          false,
+			NoDataExpression: true,
+		},
+		option("Connect an additional language model on the canvas to use it as a fallback if the main model fails", "fallbackNotice", "notice", "", nil),
+		collection("Options", "options", []Property{
+			textArea("System Message", "systemMessage", "You are a helpful assistant"),
+			numberProp("Max Iterations", "maxIterations", 10),
+			option("Return Intermediate Steps", "returnIntermediateSteps", "boolean", false, nil),
+			option("Automatically Passthrough Binary Images", "passthroughBinaryImages", "boolean", true, nil),
+			fixedCollectionGroup("Tracing Metadata", "tracingMetadata", "values", "Metadata", true, []Property{
+				text("Key", "key", ""),
+				{
+					DisplayName: "Type",
+					Name:        "type",
+					Type:        "options",
+					Default:     "stringValue",
+					Description: "The field value type",
+					Options: []Option{
+						{Name: "Array", Value: "arrayValue"},
+						{Name: "Boolean", Value: "booleanValue"},
+						{Name: "Number", Value: "numberValue"},
+						{Name: "Object", Value: "objectValue"},
+						{Name: "String", Value: "stringValue"},
+					},
+				},
+				text("Value", "stringValue", ""),
+				text("Value", "numberValue", ""),
+				option("Value", "booleanValue", "options", "true", []Option{{Name: "True", Value: "true"}, {Name: "False", Value: "false"}}),
+				text("Value", "arrayValue", ""),
+				jsonProp("Value", "objectValue", "={}"),
+			}),
+			option("Enable Streaming", "enableStreaming", "boolean", true, nil),
+			collection("Batch Processing", "batching", []Property{
+				numberProp("Batch Size", "batchSize", 1),
+				numberProp("Delay Between Batches", "delayBetweenBatches", 0),
+			}),
+		}),
+	)
+	node.Version = []float64{1, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2, 2.1, 2.2, 2.3, 3, 3.1}
+	node.DefaultVersion = 3.1
+	node.Defaults.Color = "#404040"
+	node.IconColor = ""
+	node.Inputs = aiAgentInputsExpression()
+	node.Outputs = []string{"main"}
+	for index := range node.Properties {
+		switch node.Properties[index].Name {
+		case "notice":
+			node.Properties[index].DisplayOptions = map[string]any{"show": map[string][]any{"hasOutputParser": []any{true}}}
+		case "fallbackNotice":
+			node.Properties[index].DisplayOptions = map[string]any{"show": map[string][]any{"needsFallback": []any{true}}}
+		}
+	}
+	node.DocumentationURL = "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+	node.Codex = codexForAppCategory("AI", node.DocumentationURL)
+	return node
+}
+
+func aiAgentInputsExpression() string {
+	return `={{
+	((hasOutputParser, needsFallback) => {
+		const getInputData = (inputs) => inputs.map(({ type, filter, displayName, required }) => {
+			const input = {
+				type,
+				displayName,
+				required,
+				maxConnections: ['ai_languageModel', 'ai_memory', 'ai_outputParser'].includes(type) ? 1 : undefined,
+			};
+			if (filter) input.filter = filter;
+			return input;
+		});
+		let specialInputs = [
+			{ type: 'ai_languageModel', displayName: 'Chat Model', required: true, filter: { excludedNodes: ['@n8n/n8n-nodes-langchain.lmCohere', '@n8n/n8n-nodes-langchain.lmOllama', 'n8n/n8n-nodes-langchain.lmOpenAi', '@n8n/n8n-nodes-langchain.lmOpenHuggingFaceInference'] } },
+			{ type: 'ai_languageModel', displayName: 'Fallback Model', required: true, filter: { excludedNodes: ['@n8n/n8n-nodes-langchain.lmCohere', '@n8n/n8n-nodes-langchain.lmOllama', 'n8n/n8n-nodes-langchain.lmOpenAi', '@n8n/n8n-nodes-langchain.lmOpenHuggingFaceInference'] } },
+			{ type: 'ai_memory', displayName: 'Memory' },
+			{ type: 'ai_tool', displayName: 'Tool' },
+			{ type: 'ai_outputParser', displayName: 'Output Parser' },
+		];
+		if (hasOutputParser === false) specialInputs = specialInputs.filter((input) => input.type !== 'ai_outputParser');
+		if (needsFallback === false) specialInputs = specialInputs.filter((input) => input.displayName !== 'Fallback Model');
+		return ['main', ...getInputData(specialInputs)];
+	})($parameter.hasOutputParser === undefined || $parameter.hasOutputParser === true, $parameter.needsFallback !== undefined && $parameter.needsFallback === true)
+}}`
+}
+
+func googleGeminiChatModelNode() NodeType {
+	node := base("@n8n/n8n-nodes-langchain.lmChatGoogleGemini", "Google Gemini Chat Model", "Provides a Google Gemini chat model for AI workflows", []string{"transform"}, "utility", "file:google.svg",
+		Property{
+			DisplayName: "This node must be connected to an AI chain. <a data-action='openSelectiveNodeCreator' data-action-parameter-creatorview='AI'>Insert one</a>",
+			Name:        "notice",
+			Type:        "notice",
+			Default:     "",
+			TypeOptions: map[string]any{"containerClass": "ndv-connection-hint-notice"},
+		},
+		Property{
+			DisplayName: "Model",
+			Name:        "modelName",
+			Type:        "options",
+			Default:     "models/gemini-2.5-flash",
+			Description: "The model which will generate the completion. <a href=\"https://developers.generativeai.google/api/rest/generativelanguage/models/list\">Learn more</a>.",
+			TypeOptions: map[string]any{
+				"loadOptions": map[string]any{
+					"routing": map[string]any{
+						"request": map[string]any{"method": "GET", "url": "/v1beta/models"},
+						"output": map[string]any{"postReceive": []any{
+							map[string]any{"type": "rootProperty", "properties": map[string]any{"property": "models"}},
+							map[string]any{"type": "filter", "properties": map[string]any{"pass": "={{ !$responseItem.name.includes('embedding') }}"}},
+							map[string]any{"type": "setKeyValue", "properties": map[string]any{
+								"name":        "={{$responseItem.name}}",
+								"value":       "={{$responseItem.name}}",
+								"description": "={{$responseItem.description}}",
+							}},
+							map[string]any{"type": "sort", "properties": map[string]any{"key": "name"}},
+						}},
+					},
+				},
+			},
+		},
+		collection("Options", "options", []Property{
+			numberProp("Maximum Number of Tokens", "maxOutputTokens", 2048),
+			numberProp("Sampling Temperature", "temperature", 0.4),
+			numberProp("Top K", "topK", 32),
+			numberProp("Top P", "topP", 1),
+			fixedCollectionGroup("Safety Settings", "safetySettings", "values", "Safety Settings", true, []Property{
+				option("Safety Category", "category", "options", "HARM_CATEGORY_UNSPECIFIED", []Option{
+					{Name: "HARM_CATEGORY_HARASSMENT", Value: "HARM_CATEGORY_HARASSMENT", Description: "Harassment content"},
+					{Name: "HARM_CATEGORY_HATE_SPEECH", Value: "HARM_CATEGORY_HATE_SPEECH", Description: "Hate speech and content"},
+					{Name: "HARM_CATEGORY_SEXUALLY_EXPLICIT", Value: "HARM_CATEGORY_SEXUALLY_EXPLICIT", Description: "Sexually explicit content"},
+					{Name: "HARM_CATEGORY_DANGEROUS_CONTENT", Value: "HARM_CATEGORY_DANGEROUS_CONTENT", Description: "Dangerous content"},
+				}),
+				option("Safety Threshold", "threshold", "options", "HARM_BLOCK_THRESHOLD_UNSPECIFIED", []Option{
+					{Name: "HARM_BLOCK_THRESHOLD_UNSPECIFIED", Value: "HARM_BLOCK_THRESHOLD_UNSPECIFIED", Description: "Threshold is unspecified"},
+					{Name: "BLOCK_LOW_AND_ABOVE", Value: "BLOCK_LOW_AND_ABOVE", Description: "Content with NEGLIGIBLE will be allowed"},
+					{Name: "BLOCK_MEDIUM_AND_ABOVE", Value: "BLOCK_MEDIUM_AND_ABOVE", Description: "Content with NEGLIGIBLE and LOW will be allowed"},
+					{Name: "BLOCK_ONLY_HIGH", Value: "BLOCK_ONLY_HIGH", Description: "Content with NEGLIGIBLE, LOW, and MEDIUM will be allowed"},
+					{Name: "BLOCK_NONE", Value: "BLOCK_NONE", Description: "All content will be allowed"},
+				}),
+			}),
+		}),
+	)
+	node.Version = 1
+	node.DefaultVersion = nil
+	node.Inputs = []string{}
+	node.Outputs = []string{"ai_languageModel"}
+	node.OutputNames = []string{"Model"}
+	node.Credentials = []CredentialUsage{{Name: "googlePalmApi", Required: true}}
+	node.RequestDefaults = map[string]any{
+		"ignoreHttpStatusErrors": true,
+		"baseURL":                "={{ $credentials.host }}",
+	}
+	node.DocumentationURL = "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatgooglegemini/"
+	node.Codex = codexForAppCategory("AI", node.DocumentationURL)
+	return node
+}
+
+func deepSeekChatModelNode() NodeType {
+	return openAICompatibleChatModelNode(openAICompatibleChatModelConfig{
+		Name:             "@n8n/n8n-nodes-langchain.lmChatDeepSeek",
+		DisplayName:      "DeepSeek Chat Model",
+		Icon:             "file:deepseek.svg",
+		Credential:       "deepSeekApi",
+		DefaultModel:     "deepseek-chat",
+		ModelDescription: "The model which will generate the completion. <a href=\"https://api-docs.deepseek.com/quick_start/pricing\">Learn more</a>.",
+		DocumentationURL: "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatdeepseek/",
+	})
+}
+
+func openRouterChatModelNode() NodeType {
+	return openAICompatibleChatModelNode(openAICompatibleChatModelConfig{
+		Name:             "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+		DisplayName:      "OpenRouter Chat Model",
+		Icon:             "file:openrouter.svg",
+		Credential:       "openRouterApi",
+		DefaultModel:     "openai/gpt-4.1-mini",
+		ModelDescription: "The model which will generate the completion. <a href=\"https://openrouter.ai/docs/models\">Learn more</a>.",
+		DocumentationURL: "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenrouter/",
+	})
+}
+
+type openAICompatibleChatModelConfig struct {
+	Name             string
+	DisplayName      string
+	Icon             string
+	Credential       string
+	DefaultModel     string
+	ModelDescription string
+	DocumentationURL string
+}
+
+func openAICompatibleChatModelNode(config openAICompatibleChatModelConfig) NodeType {
+	node := base(config.Name, config.DisplayName, "For advanced usage with an AI chain", []string{"transform"}, "utility", config.Icon,
+		Property{
+			DisplayName: "This node must be connected to an AI chain. <a data-action='openSelectiveNodeCreator' data-action-parameter-creatorview='AI'>Insert one</a>",
+			Name:        "notice",
+			Type:        "notice",
+			Default:     "",
+			TypeOptions: map[string]any{"containerClass": "ndv-connection-hint-notice"},
+		},
+		Property{
+			DisplayName: "If using JSON response format, you must include word \"json\" in the prompt in your chain or agent. Also, make sure to select latest models released post November 2023.",
+			Name:        "notice",
+			Type:        "notice",
+			Default:     "",
+			DisplayOptions: map[string]any{
+				"show": map[string][]any{
+					"/options.responseFormat": []any{"json_object"},
+				},
+			},
+		},
+		Property{
+			DisplayName: "Model",
+			Name:        "model",
+			Type:        "options",
+			Default:     config.DefaultModel,
+			Description: config.ModelDescription,
+			TypeOptions: map[string]any{
+				"loadOptions": map[string]any{
+					"routing": map[string]any{
+						"request": map[string]any{"method": "GET", "url": "/models"},
+						"output": map[string]any{"postReceive": []any{
+							map[string]any{"type": "rootProperty", "properties": map[string]any{"property": "data"}},
+							map[string]any{"type": "setKeyValue", "properties": map[string]any{
+								"name":  "={{$responseItem.id}}",
+								"value": "={{$responseItem.id}}",
+							}},
+							map[string]any{"type": "sort", "properties": map[string]any{"key": "name"}},
+						}},
+					},
+				},
+			},
+		},
+		collection("Options", "options", []Property{
+			openAICompatibleNumberOption("Frequency Penalty", "frequencyPenalty", 0, -2, 2, 1),
+			openAICompatibleNumberOption("Maximum Number of Tokens", "maxTokens", -1, 0, 32768, 0),
+			selectProp("Response Format", "responseFormat", "text", []Option{
+				{Name: "Text", Value: "text"},
+				{Name: "JSON", Value: "json_object"},
+			}),
+			openAICompatibleNumberOption("Presence Penalty", "presencePenalty", 0, -2, 2, 1),
+			openAICompatibleNumberOption("Sampling Temperature", "temperature", 0.7, 0, 2, 1),
+			numberProp("Timeout", "timeout", 360000),
+			numberProp("Max Retries", "maxRetries", 2),
+			openAICompatibleNumberOption("Top P", "topP", 1, 0, 1, 1),
+		}),
+	)
+	node.Version = 1
+	node.DefaultVersion = nil
+	node.Defaults.Name = config.DisplayName
+	node.Inputs = []string{}
+	node.Outputs = []string{"ai_languageModel"}
+	node.OutputNames = []string{"Model"}
+	node.Credentials = []CredentialUsage{{Name: config.Credential, Required: true}}
+	node.RequestDefaults = map[string]any{
+		"baseURL": "={{ $credentials?.url }}",
+	}
+	node.DocumentationURL = config.DocumentationURL
+	node.Codex = codexForAppCategory("AI", node.DocumentationURL)
+	return node
+}
+
+func openAICompatibleNumberOption(display string, name string, def float64, min float64, max float64, precision float64) Property {
+	prop := numberProp(display, name, def)
+	options := map[string]any{}
+	if max > min {
+		options["minValue"] = min
+		options["maxValue"] = max
+	}
+	if precision > 0 {
+		options["numberPrecision"] = precision
+	}
+	if len(options) > 0 {
+		prop.TypeOptions = options
+	}
+	return prop
 }
 
 func trigger(name string, display string, description string, icon string, props ...Property) NodeType {
@@ -895,6 +1696,7 @@ func sqlOptionsCollection(operation string) []Property {
 func base(name string, display string, description string, group []string, category string, icon string, props ...Property) NodeType {
 	properties := make([]Property, 0, len(props))
 	properties = append(properties, props...)
+	iconValue := builtinNodeIcon(name, icon)
 	return NodeType{
 		Name:             name,
 		DisplayName:      display,
@@ -905,8 +1707,8 @@ func base(name string, display string, description string, group []string, categ
 		Properties:       properties,
 		Inputs:           []string{"main"},
 		Outputs:          []string{"main"},
-		Icon:             builtinNodeIcon(name, icon),
-		IconURL:          builtinNodeIconURL(name),
+		Icon:             iconValue,
+		IconURL:          builtinNodeIconURL(name, iconValue),
 		Group:            group,
 		Category:         category,
 		DocumentationURL: "https://docs.n8n.io/integrations/builtin/core-nodes/" + strings.TrimPrefix(name, "n8n-nodes-base."),

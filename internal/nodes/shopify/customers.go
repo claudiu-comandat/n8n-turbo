@@ -14,7 +14,7 @@ func (n *Node) handleCustomer(ctx context.Context, cred Credential, operation st
 	case OpGetAll, "list":
 		return n.listCustomers(ctx, cred, params)
 	case OpGet:
-		id := int64Param(params, "customerId")
+		id := firstInt64(params, "customerId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("customerId is required")
 		}
@@ -27,7 +27,7 @@ func (n *Node) handleCustomer(ctx context.Context, cred Credential, operation st
 	case OpUpdate:
 		return singleValue(n.updateCustomer(ctx, cred, params))
 	case OpDelete:
-		id := int64Param(params, "customerId")
+		id := firstInt64(params, "customerId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("customerId is required")
 		}
@@ -93,7 +93,7 @@ func (n *Node) createCustomer(ctx context.Context, cred Credential, params map[s
 }
 
 func (n *Node) updateCustomer(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
-	id := int64Param(params, "customerId")
+	id := firstInt64(params, "customerId", "id")
 	if id == 0 {
 		return nil, fmt.Errorf("customerId is required")
 	}
@@ -128,6 +128,17 @@ func customerBody(params map[string]any, item dataplane.Item, partial bool) (map
 		"password":  "password",
 	} {
 		setString(customer, key, stringParam(params, param))
+	}
+	extraKey := "additionalFields"
+	if partial {
+		extraKey = "updateFields"
+	}
+	if extra, err := mapParam(params, extraKey); err != nil {
+		return nil, err
+	} else {
+		for key, value := range extra {
+			customer[key] = value
+		}
 	}
 	if customer["email"] == nil && item.JSON["email"] != nil {
 		customer["email"] = item.JSON["email"]

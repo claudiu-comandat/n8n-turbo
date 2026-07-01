@@ -29,13 +29,44 @@ func ScheduledTriggerItem(node dataplane.Node, at time.Time) dataplane.Item {
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
+	local := at
+	_, offset := local.Zone()
+	offsetSign := "+"
+	if offset < 0 {
+		offsetSign = "-"
+		offset = -offset
+	}
+	offsetHours := offset / 3600
+	offsetMinutes := (offset % 3600) / 60
 	return dataplane.Item{JSON: map[string]any{
-		"scheduled":     true,
-		"trigger":       node.Name,
-		"scheduledTime": at.UTC().Format(time.RFC3339Nano),
-		"timestamp":     at.Unix(),
-		"timezone":      at.Location().String(),
+		"timestamp":     local.Format("2006-01-02T15:04:05.000-07:00"),
+		"Readable date": fmt.Sprintf("%s %s %04d, %s", local.Month().String(), ordinalScheduleDay(local.Day()), local.Year(), strings.ToLower(local.Format("3:04:05 PM"))),
+		"Readable time": strings.ToLower(local.Format("3:04:05 PM")),
+		"Day of week":   local.Weekday().String(),
+		"Year":          local.Format("2006"),
+		"Month":         local.Month().String(),
+		"Day of month":  local.Format("02"),
+		"Hour":          local.Format("15"),
+		"Minute":        local.Format("04"),
+		"Second":        local.Format("05"),
+		"Timezone":      fmt.Sprintf("%s (UTC%s%02d:%02d)", local.Location().String(), offsetSign, offsetHours, offsetMinutes),
 	}}
+}
+
+func ordinalScheduleDay(day int) string {
+	if day%100 >= 11 && day%100 <= 13 {
+		return fmt.Sprintf("%dth", day)
+	}
+	switch day % 10 {
+	case 1:
+		return fmt.Sprintf("%dst", day)
+	case 2:
+		return fmt.Sprintf("%dnd", day)
+	case 3:
+		return fmt.Sprintf("%drd", day)
+	default:
+		return fmt.Sprintf("%dth", day)
+	}
 }
 
 func BuildScheduleCronExpression(parameters map[string]any) (string, error) {

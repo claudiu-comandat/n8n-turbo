@@ -1,5 +1,7 @@
 package dataplane
 
+import "sort"
+
 type Graph struct {
 	workflow Workflow
 	nodes    map[string]int
@@ -89,6 +91,38 @@ func (g *Graph) InputCount(name, connectionType string) int {
 		return 0
 	}
 	return len(byType[connectionType])
+}
+
+func (g *Graph) InputEdges(name, connectionType string) [][]InverseConnection {
+	byType, ok := g.inverted[name]
+	if !ok {
+		return nil
+	}
+	edges := byType[connectionType]
+	if len(edges) == 0 {
+		return nil
+	}
+	result := make([][]InverseConnection, len(edges))
+	for index := range edges {
+		result[index] = append([]InverseConnection(nil), edges[index]...)
+	}
+	return result
+}
+
+func (g *Graph) InputTypes(name string) []string {
+	byType, ok := g.inverted[name]
+	if !ok {
+		return nil
+	}
+	types := make([]string, 0, len(byType))
+	for connectionType, edges := range byType {
+		if len(edges) == 0 {
+			continue
+		}
+		types = append(types, connectionType)
+	}
+	sort.Strings(types)
+	return types
 }
 
 func (g *Graph) OutputEdges(name, connectionType string, outputIndex int) []Connection {

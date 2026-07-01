@@ -17,6 +17,7 @@ type switchRule struct {
 	Value2        any
 	OutputIndex   int
 	CaseSensitive bool
+	Conditions    map[string]any
 }
 
 type switchParams struct {
@@ -24,6 +25,7 @@ type switchParams struct {
 	Value          any
 	DataType       string
 	OutputType     string
+	NumberOutputs  int
 	FallbackOutput *int
 	Rules          []switchRule
 }
@@ -38,6 +40,10 @@ func (Switch) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Ou
 	items := firstInput(in.InputData)
 	output := dataplane.Output{}
 	for index, item := range items {
+		item = itemWithPairedIndex(item, index, true)
+		if strings.EqualFold(params.Mode, "expression") && index == 0 && params.NumberOutputs > 0 {
+			output = ensureOutput(output, params.NumberOutputs-1)
+		}
 		targets, err := switchTargets(in, params, items, index, item)
 		if err != nil {
 			return nil, err
@@ -45,6 +51,9 @@ func (Switch) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Ou
 		for _, target := range targets {
 			if target < 0 {
 				continue
+			}
+			if strings.EqualFold(params.Mode, "expression") && params.NumberOutputs > 0 && target >= params.NumberOutputs {
+				return nil, fmt.Errorf("switch: output %d is not allowed; it has to be between 0 and %d", target, params.NumberOutputs-1)
 			}
 			output = ensureOutput(output, target)
 			output[target] = append(output[target], item)
@@ -64,16 +73,24 @@ func parseSwitchParams(raw map[string]any) switchParams {
 	if value, ok := raw["value"]; ok {
 		params.Value = value
 	}
+	if strings.EqualFold(params.Mode, "expression") {
+		params.Value = firstPresent(raw, "output", "value")
+		params.NumberOutputs = intParam(raw, "numberOutputs", 4)
+	}
 	if value := stringParam(raw, "dataType"); value != "" {
 		params.DataType = value
 	}
-	if value := stringParam(raw, "output"); value != "" {
+	if value := stringParam(raw, "output"); value == "single" || value == "multiple" {
 		params.OutputType = value
 	}
-	if value := intOptional(raw["fallbackOutput"]); value != nil {
+	params.Rules = parseSwitchRules(raw["rules"])
+	options, _ := rawObject(raw["options"])
+	if boolParam(options, "allMatchingOutputs", false) {
+		params.OutputType = "multiple"
+	}
+	if value := switchFallbackOutput(firstNonNil(options["fallbackOutput"], raw["fallbackOutput"]), len(params.Rules)); value != nil {
 		params.FallbackOutput = value
 	}
-	params.Rules = parseSwitchRules(raw["rules"])
 	return params
 }
 
@@ -100,12 +117,14 @@ func parseSwitchRuleList(values []any) []switchRule {
 		if parsed := intOptional(object["outputIndex"]); parsed != nil {
 			outputIndex = *parsed
 		}
+		conditions, _ := rawObject(object["conditions"])
 		rules = append(rules, switchRule{
 			Operation:     firstString(object, "operation", "operator", "type"),
 			Value1:        firstPresent(object, "value1", "leftValue"),
 			Value2:        firstPresent(object, "value2", "rightValue"),
 			OutputIndex:   outputIndex,
 			CaseSensitive: boolParam(object, "caseSensitive", false),
+			Conditions:    conditions,
 		})
 	}
 	return rules
@@ -153,6 +172,16 @@ func switchExpressionTarget(in engine.ExecuteInput, params switchParams, items [
 func switchRuleTargets(in engine.ExecuteInput, params switchParams, items []dataplane.Item, index int, item dataplane.Item) []int {
 	targets := make([]int, 0)
 	for _, rule := range params.Rules {
+		if rule.Conditions != nil {
+			if !conditionsMatch(in, items, index, item, rule.Conditions) {
+				continue
+			}
+			targets = append(targets, rule.OutputIndex)
+			if strings.ToLower(params.OutputType) != "multiple" {
+				return targets
+			}
+			continue
+		}
 		left := resolveValue(in, items, index, rule.Value1)
 		right := resolveValue(in, items, index, rule.Value2)
 		if !rule.CaseSensitive {
@@ -184,6 +213,19 @@ func maxSwitchOutput(params switchParams) int {
 		}
 	}
 	return maxIndex
+}
+
+func switchFallbackOutput(value any, ruleCount int) *int {
+	if text, ok := value.(string); ok {
+		switch strings.ToLower(strings.TrimSpace(text)) {
+		case "", "none":
+			return nil
+		case "extra":
+			index := ruleCount
+			return &index
+		}
+	}
+	return intOptional(value)
 }
 
 func ensureOutput(output dataplane.Output, index int) dataplane.Output {

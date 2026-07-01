@@ -3,6 +3,7 @@ package nodes
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -20,8 +21,9 @@ var postgresDialect = sqlDialect{Name: "postgres", Quote: `"`, Placeholder: func
 var mysqlDialect = sqlDialect{Name: "mysql", Quote: "`", Placeholder: func(index int) string { return "?" }}
 
 func executeSQLNode(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect sqlDialect) (dataplane.Output, error) {
-	switch strings.ToLower(stringParam(in.Node.Parameters, "operation")) {
-	case "", "executequery":
+	operation := sqlOperation(in.Node.Parameters)
+	switch operation {
+	case "executequery":
 		return sqlExecuteQuery(ctx, db, in, dialect)
 	case "insert":
 		return sqlInsert(ctx, db, in, dialect)
@@ -36,6 +38,17 @@ func executeSQLNode(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dia
 	default:
 		return nil, fmt.Errorf("unsupported %s operation %q", dialect.Name, stringParam(in.Node.Parameters, "operation"))
 	}
+}
+
+func sqlOperation(params map[string]any) string {
+	operation := strings.ToLower(stringParam(params, "operation"))
+	if operation != "" {
+		return operation
+	}
+	if strings.TrimSpace(stringParam(params, "query")) != "" {
+		return "executequery"
+	}
+	return "insert"
 }
 
 func sqlExecuteQuery(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect sqlDialect) (dataplane.Output, error) {
@@ -139,6 +152,9 @@ func sqlInsert(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect 
 			placeholders = append(placeholders, dialect.Placeholder(index+1))
 		}
 		query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, sqlIdentList(columns, dialect), strings.Join(placeholders, ", "))
+		if boolParam(sqlOptions(in.Node.Parameters), "skipOnConflict", false) && dialect.Name == "postgres" {
+			query += " ON CONFLICT DO NOTHING"
+		}
 		if returning := sqlReturningClause(in.Node.Parameters, dialect); returning != "" {
 			rows, err := sqlQueryRows(ctx, db, query+" RETURNING "+returning, args...)
 			if err != nil {
@@ -176,27 +192,16 @@ func sqlUpsert(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect 
 		if len(matchColumns) == 0 {
 			matchColumns = columns[:1]
 		}
-		args := make([]any, 0, len(columns))
-		placeholders := make([]string, 0, len(columns))
-		for index, column := range columns {
-			args = append(args, sourceItem[column])
-			placeholders = append(placeholders, dialect.Placeholder(index+1))
+		query, updateColumns, err := sqlUpsertQuery(table, columns, matchColumns, dialect)
+		if err != nil {
+			return nil, err
 		}
-		setParts := make([]string, 0, len(columns))
+		args := make([]any, 0, len(columns)+len(updateColumns))
 		for _, column := range columns {
-			if containsString(matchColumns, column) {
-				continue
-			}
-			setParts = append(setParts, fmt.Sprintf("%s = EXCLUDED.%s", sqlIdent(column, dialect), sqlIdent(column, dialect)))
+			args = append(args, sourceItem[column])
 		}
-		query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, sqlIdentList(columns, dialect), strings.Join(placeholders, ", "))
-		if len(matchColumns) > 0 {
-			query += " ON CONFLICT (" + sqlIdentList(matchColumns, dialect) + ")"
-			if len(setParts) > 0 {
-				query += " DO UPDATE SET " + strings.Join(setParts, ", ")
-			} else {
-				query += " DO NOTHING"
-			}
+		for _, column := range updateColumns {
+			args = append(args, sourceItem[column])
 		}
 		if returning := sqlReturningClause(in.Node.Parameters, dialect); returning != "" {
 			rows, err := sqlQueryRows(ctx, db, query+" RETURNING "+returning, args...)
@@ -213,6 +218,42 @@ func sqlUpsert(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect 
 		output = append(output, sqlResultItem(result))
 	}
 	return dataplane.MainOutput(output), nil
+}
+
+func sqlUpsertQuery(table string, columns []string, matchColumns []string, dialect sqlDialect) (string, []string, error) {
+	placeholders := make([]string, 0, len(columns))
+	for index := range columns {
+		placeholders = append(placeholders, dialect.Placeholder(index+1))
+	}
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, sqlIdentList(columns, dialect), strings.Join(placeholders, ", "))
+
+	updateColumns := make([]string, 0, len(columns))
+	for _, column := range columns {
+		if !containsString(matchColumns, column) {
+			updateColumns = append(updateColumns, column)
+		}
+	}
+
+	if dialect.Name == "mysql" {
+		if len(updateColumns) == 0 {
+			return "", nil, fmt.Errorf("%s upsert requires non-key columns", dialect.Name)
+		}
+		setParts := make([]string, 0, len(updateColumns))
+		for index, column := range updateColumns {
+			setParts = append(setParts, fmt.Sprintf("%s = %s", sqlIdent(column, dialect), dialect.Placeholder(len(columns)+index+1)))
+		}
+		return query + " ON DUPLICATE KEY UPDATE " + strings.Join(setParts, ", "), updateColumns, nil
+	}
+
+	query += " ON CONFLICT (" + sqlIdentList(matchColumns, dialect) + ")"
+	if len(updateColumns) == 0 {
+		return query + " DO NOTHING", nil, nil
+	}
+	setParts := make([]string, 0, len(updateColumns))
+	for _, column := range updateColumns {
+		setParts = append(setParts, fmt.Sprintf("%s = EXCLUDED.%s", sqlIdent(column, dialect), sqlIdent(column, dialect)))
+	}
+	return query + " DO UPDATE SET " + strings.Join(setParts, ", "), nil, nil
 }
 
 func sqlUpdate(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect sqlDialect) (dataplane.Output, error) {
@@ -367,7 +408,11 @@ func sqlSelect(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect 
 	}
 	options := sqlOptions(in.Node.Parameters)
 	columns := sqlSelectColumns(in.Node.Parameters, options, dialect)
-	query := fmt.Sprintf("SELECT %s FROM %s", columns, table)
+	selectKeyword := "SELECT"
+	if dialect.Name == "mysql" && boolParam(options, "selectDistinct", false) {
+		selectKeyword = "SELECT DISTINCT"
+	}
+	query := fmt.Sprintf("%s %s FROM %s", selectKeyword, columns, table)
 	args := []any{}
 	if raw := strings.TrimSpace(stringParam(in.Node.Parameters, "where")); raw != "" {
 		query += " WHERE " + raw
@@ -382,7 +427,11 @@ func sqlSelect(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect 
 	if sortClause := sqlSortClause(in.Node.Parameters, dialect); sortClause != "" {
 		query += " " + sortClause
 	}
-	if limit := intParam(in.Node.Parameters, "limit", 0); limit > 0 {
+	if !boolParam(in.Node.Parameters, "returnAll", boolParam(options, "returnAll", false)) {
+		limit := intParam(in.Node.Parameters, "limit", intParam(options, "limit", 50))
+		if limit <= 0 {
+			limit = 50
+		}
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 	if offset := intParam(in.Node.Parameters, "offset", 0); offset > 0 {
@@ -435,10 +484,20 @@ func sqlResultItem(result sql.Result) dataplane.Item {
 }
 
 func sqlArgs(in engine.ExecuteInput, items []dataplane.Item, index int) []any {
+	options := sqlOptions(in.Node.Parameters)
+	if raw, ok := options["queryReplacement"]; ok {
+		if args := sqlArgsFromRaw(in, items, index, raw); len(args) > 0 {
+			return args
+		}
+	}
 	raw, ok := in.Node.Parameters["queryParams"]
 	if !ok {
 		raw = in.Node.Parameters["parameters"]
 	}
+	return sqlArgsFromRaw(in, items, index, raw)
+}
+
+func sqlArgsFromRaw(in engine.ExecuteInput, items []dataplane.Item, index int, raw any) []any {
 	if object, ok := raw.(map[string]any); ok {
 		if values, ok := object["values"].([]any); ok {
 			raw = values
@@ -446,10 +505,38 @@ func sqlArgs(in engine.ExecuteInput, items []dataplane.Item, index int) []any {
 			raw = values
 		}
 	}
-	values, ok := raw.([]any)
-	if !ok {
+	switch values := raw.(type) {
+	case nil:
 		return nil
+	case []any:
+		return sqlResolveArgs(in, items, index, values)
+	case []string:
+		args := make([]any, 0, len(values))
+		for _, value := range values {
+			args = append(args, resolveValue(in, items, index, value))
+		}
+		return args
+	case string:
+		rawText := strings.TrimSpace(fmt.Sprint(resolveValue(in, items, index, values)))
+		if rawText == "" {
+			return nil
+		}
+		var decoded []any
+		if json.Unmarshal([]byte(rawText), &decoded) == nil {
+			return sqlResolveArgs(in, items, index, decoded)
+		}
+		parts := splitCSV(rawText)
+		args := make([]any, 0, len(parts))
+		for _, value := range parts {
+			args = append(args, resolveValue(in, items, index, value))
+		}
+		return args
+	default:
+		return []any{resolveValue(in, items, index, raw)}
 	}
+}
+
+func sqlResolveArgs(in engine.ExecuteInput, items []dataplane.Item, index int, values []any) []any {
 	args := make([]any, 0, len(values))
 	for _, value := range values {
 		if object, ok := value.(map[string]any); ok {

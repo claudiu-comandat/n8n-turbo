@@ -45,19 +45,20 @@ type GmailEmailAttachment struct {
 }
 
 type GmailEmailParams struct {
-	To          string
-	CC          string
-	BCC         string
-	From        string
-	ReplyTo     string
-	Subject     string
-	Body        string
-	IsHTML      bool
-	Attachments []GmailEmailAttachment
+	To           string
+	CC           string
+	BCC          string
+	From         string
+	ReplyTo      string
+	Subject      string
+	Body         string
+	IsHTML       bool
+	Attachments  []GmailEmailAttachment
+	AllowEmptyTo bool
 }
 
 func BuildGmailEmailRaw(params GmailEmailParams) (string, error) {
-	if strings.TrimSpace(params.To) == "" {
+	if strings.TrimSpace(params.To) == "" && !params.AllowEmptyTo {
 		return "", fmt.Errorf("gmail: to is required")
 	}
 	var buffer bytes.Buffer

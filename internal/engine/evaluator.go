@@ -190,24 +190,25 @@ func (e *Evaluator) executeNode(ctx context.Context, workflow dataplane.Workflow
 	}
 	inputData := flattenInputs(nodeInputs)
 	input := ExecuteInput{
-		Node:          node,
-		NextNodes:     downstreamNodes(graph, node.Name),
-		InputData:     inputData,
-		RunData:       runData,
-		Variables:     options.Variables,
-		Secrets:       options.Secrets,
-		Credentials:   credentials,
-		BinaryStore:   options.BinaryStore,
-		WorkflowID:    workflow.ID,
-		WorkflowName:  workflow.Name,
-		ExecutionID:   executionID,
-		ExecutionMode: mode,
-		ResumeURL:     options.ResumeURL,
-		ResumeFormURL: options.ResumeFormURL,
-		ScheduledTime: options.ScheduledTime,
-		Expr:          e.resolver,
-		SubWorkflow:   options.SubWorkflow,
-		CallStack:     options.CallStack,
+		Node:           node,
+		NextNodes:      downstreamNodes(graph, node.Name),
+		InputData:      inputData,
+		ConnectedNodes: e.connectedNodes(ctx, graph, node.Name, options),
+		RunData:        runData,
+		Variables:      options.Variables,
+		Secrets:        options.Secrets,
+		Credentials:    credentials,
+		BinaryStore:    options.BinaryStore,
+		WorkflowID:     workflow.ID,
+		WorkflowName:   workflow.Name,
+		ExecutionID:    executionID,
+		ExecutionMode:  mode,
+		ResumeURL:      options.ResumeURL,
+		ResumeFormURL:  options.ResumeFormURL,
+		ScheduledTime:  options.ScheduledTime,
+		Expr:           e.resolver,
+		SubWorkflow:    options.SubWorkflow,
+		CallStack:      options.CallStack,
 	}
 	emitNodeBefore(ctx, options, workflow, executionID, node, input.InputData)
 	output, err := executeNodeWithRetry(ctx, executor, input)
@@ -215,6 +216,44 @@ func (e *Evaluator) executeNode(ctx context.Context, workflow dataplane.Workflow
 		return buildErrorOutput(node, input.InputData, err), err
 	}
 	return output, err
+}
+
+func (e *Evaluator) connectedNodes(ctx context.Context, graph *dataplane.Graph, nodeName string, options ExecuteOptions) map[string][][]ConnectedNode {
+	if graph == nil {
+		return nil
+	}
+	result := map[string][][]ConnectedNode{}
+	for _, connectionType := range graph.InputTypes(nodeName) {
+		inputs := graph.InputEdges(nodeName, connectionType)
+		if len(inputs) == 0 {
+			continue
+		}
+		grouped := make([][]ConnectedNode, len(inputs))
+		for inputIndex, edges := range inputs {
+			grouped[inputIndex] = make([]ConnectedNode, 0, len(edges))
+			for _, edge := range edges {
+				parent, ok := graph.Node(edge.Node)
+				if !ok || parent == nil {
+					continue
+				}
+				creds := map[string]map[string]any{}
+				if options.Credentials != nil {
+					resolved, err := options.Credentials(ctx, *parent)
+					if err == nil {
+						creds = resolved
+					}
+				}
+				grouped[inputIndex] = append(grouped[inputIndex], ConnectedNode{
+					Node:        *parent,
+					Credentials: creds,
+					OutputIndex: edge.OutputIdx,
+					InputIndex:  inputIndex,
+				})
+			}
+		}
+		result[connectionType] = grouped
+	}
+	return result
 }
 
 type readyResult struct {

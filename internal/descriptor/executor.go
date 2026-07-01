@@ -29,33 +29,40 @@ func NewExecutor(descriptor Descriptor) Executor {
 }
 
 func (e Executor) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
-	operationName := stringValue(in.Node.Parameters, "operation")
-	if operationName == "" {
-		operationName = "default"
-	}
+	params := withOfficialParamAliases(e.descriptor.NodeType, in.Node.Parameters)
+	operationName := e.operationName(params)
 	operation, ok := e.descriptor.Operations[operationName]
 	if !ok {
 		return nil, fmt.Errorf("operation %s not found for %s", operationName, e.descriptor.NodeType)
 	}
-	if err := validateParams(operation, in.Node.Parameters); err != nil {
+	if err := validateParams(operation, params); err != nil {
 		return nil, err
 	}
 	if e.descriptor.Name == "slack" && operation.Name == "uploadFile" {
-		return e.executeSlackUpload(ctx, in)
+		aliasedInput := in
+		aliasedInput.Node.Parameters = params
+		return e.executeSlackUpload(ctx, aliasedInput)
 	}
-	if e.descriptor.Name == "openai" && operation.Name == "chatCompletion" && boolValue(in.Node.Parameters, "stream", false) {
-		return e.executeOpenAIStream(ctx, operation, in.Node.Parameters, in.Credentials)
+	if e.descriptor.Name == "github" && operation.Name == "deleteFile" {
+		withSHA, err := e.withGitHubFileSHA(ctx, params, in.Credentials)
+		if err != nil {
+			return nil, err
+		}
+		params = withSHA
+	}
+	if e.descriptor.Name == "openai" && operation.Name == "chatCompletion" && boolValue(params, "stream", false) {
+		return e.executeOpenAIStream(ctx, operation, params, in.Credentials)
 	}
 	if pagination := effectivePagination(e.descriptor, operation); pagination != nil {
 		if pagination.Type == "link" {
-			items, err := e.executeLinkPagination(ctx, operation, in.Node.Parameters, in.Credentials, pagination)
+			items, err := e.executeLinkPagination(ctx, operation, params, in.Credentials, pagination)
 			if err != nil {
 				return nil, err
 			}
 			return dataplane.MainOutput(items), nil
 		}
 		items, err := NewPaginationHandler().CollectAll(ctx, func(pageParams map[string]any) ([]byte, error) {
-			merged := mergeParams(in.Node.Parameters, pageParams)
+			merged := mergeParams(params, pageParams)
 			raw, _, _, err := e.executeRaw(ctx, operation, merged, in.Credentials)
 			return raw, err
 		}, pagination)
@@ -64,12 +71,12 @@ func (e Executor) Execute(ctx context.Context, in engine.ExecuteInput) (dataplan
 		}
 		return dataplane.MainOutput(items), nil
 	}
-	raw, headers, statusCode, err := e.executeRaw(ctx, operation, in.Node.Parameters, in.Credentials)
+	raw, headers, statusCode, err := e.executeRaw(ctx, operation, params, in.Credentials)
 	if err != nil {
 		return nil, err
 	}
 	if operation.ResponseMap != "" || operation.Transform != "" {
-		return transformedOutput(raw, operation, in.Node.Parameters)
+		return transformedOutput(raw, operation, params)
 	}
 	item := dataplane.Item{JSON: map[string]any{"statusCode": statusCode, "headers": headers}}
 	var decoded any
@@ -86,6 +93,20 @@ func (e Executor) Execute(ctx context.Context, in engine.ExecuteInput) (dataplan
 		item.JSON["body"] = string(raw)
 	}
 	return dataplane.MainOutput([]dataplane.Item{item}), nil
+}
+
+func (e Executor) operationName(params map[string]any) string {
+	operationName := stringValue(params, "operation")
+	if operationName == "" {
+		operationName = "default"
+	}
+	if _, ok := e.descriptor.Operations[operationName]; ok {
+		return operationName
+	}
+	if alias := officialOperationAlias(e.descriptor.NodeType, stringValue(params, "resource"), operationName); alias != "" {
+		return alias
+	}
+	return operationName
 }
 
 func (e Executor) executeRaw(ctx context.Context, operation Operation, params map[string]any, credentials map[string]map[string]any) ([]byte, http.Header, int, error) {
@@ -194,6 +215,26 @@ func (e Executor) endpoint(operation Operation, params map[string]any, credentia
 	base = replaceTemplateValues(base, params, credentials)
 	path := operation.Path
 	path = replaceTemplateValues(path, params, credentials)
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		endpoint, err := url.Parse(path)
+		if err != nil {
+			return "", err
+		}
+		query := endpoint.Query()
+		for _, param := range operation.Params {
+			if param.In != "query" {
+				continue
+			}
+			value, ok := descriptorParamValue(params, param)
+			if ok {
+				for _, text := range queryValues(param, value) {
+					query.Add(param.Name, text)
+				}
+			}
+		}
+		endpoint.RawQuery = query.Encode()
+		return endpoint.String(), nil
+	}
 	endpoint, err := url.Parse(strings.TrimRight(base, "/") + "/" + strings.TrimLeft(path, "/"))
 	if err != nil {
 		return "", err
@@ -233,16 +274,27 @@ func applyCredentialQuery(query url.Values, credentials map[string]map[string]an
 
 func replaceTemplateValues(value string, params map[string]any, credentials map[string]map[string]any) string {
 	for key, param := range params {
-		value = strings.ReplaceAll(value, "{"+key+"}", url.PathEscape(fmt.Sprint(param)))
-		value = strings.ReplaceAll(value, "{{."+key+"}}", url.PathEscape(fmt.Sprint(param)))
+		text := templateText(param)
+		value = strings.ReplaceAll(value, "{"+key+"}", url.PathEscape(text))
+		value = strings.ReplaceAll(value, "{{."+key+"}}", url.PathEscape(text))
 	}
 	for _, credential := range credentials {
 		for key, param := range credential {
-			value = strings.ReplaceAll(value, "{"+key+"}", url.PathEscape(fmt.Sprint(param)))
-			value = strings.ReplaceAll(value, "{{."+key+"}}", url.PathEscape(fmt.Sprint(param)))
+			text := templateText(param)
+			value = strings.ReplaceAll(value, "{"+key+"}", url.PathEscape(text))
+			value = strings.ReplaceAll(value, "{{."+key+"}}", url.PathEscape(text))
 		}
 	}
 	return value
+}
+
+func templateText(value any) string {
+	if object, ok := value.(map[string]any); ok {
+		if raw, ok := object["value"]; ok {
+			return fmt.Sprint(raw)
+		}
+	}
+	return fmt.Sprint(value)
 }
 
 func requestBody(operation Operation, params map[string]any) (io.Reader, string, error) {
@@ -259,6 +311,46 @@ func requestBody(operation Operation, params map[string]any) (io.Reader, string,
 			return nil, "", err
 		}
 		data, err := json.Marshal(map[string]any{"raw": raw})
+		if err != nil {
+			return nil, "", err
+		}
+		return bytes.NewReader(data), "application/json", nil
+	}
+	if body, ok, err := gmailRequestBody(operation, params); ok {
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, "", err
+		}
+		return bytes.NewReader(data), "application/json", nil
+	}
+	if body, ok, err := airtableRequestBody(operation, params); ok {
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, "", err
+		}
+		return bytes.NewReader(data), "application/json", nil
+	}
+	if body, ok, err := googleSheetsBatchBody(operation, params); ok {
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, "", err
+		}
+		return bytes.NewReader(data), "application/json", nil
+	}
+	if body, ok, err := githubRequestBody(operation, params); ok {
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := json.Marshal(body)
 		if err != nil {
 			return nil, "", err
 		}
@@ -342,24 +434,33 @@ func requestBody(operation Operation, params map[string]any) (io.Reader, string,
 }
 
 func buildGmailRawMessage(params map[string]any) (string, error) {
+	return buildGmailRawMessageWithOptions(params, false)
+}
+
+func buildGmailRawMessageWithOptions(params map[string]any, allowEmptyTo bool) (string, error) {
 	to := stringValue(params, "to")
-	if _, err := mail.ParseAddressList(to); err != nil {
-		return "", fmt.Errorf("gmail: invalid to address: %w", err)
+	if strings.TrimSpace(to) != "" {
+		if _, err := mail.ParseAddressList(to); err != nil {
+			return "", fmt.Errorf("gmail: invalid to address: %w", err)
+		}
+	} else if !allowEmptyTo {
+		return "", fmt.Errorf("gmail: to is required")
 	}
 	attachments, err := gmailAttachmentsFromParams(params)
 	if err != nil {
 		return "", err
 	}
 	return BuildGmailEmailRaw(GmailEmailParams{
-		To:          to,
-		CC:          stringValue(params, "cc"),
-		BCC:         stringValue(params, "bcc"),
-		From:        stringValue(params, "from"),
-		ReplyTo:     stringValue(params, "replyTo"),
-		Subject:     stringValue(params, "subject"),
-		Body:        stringValue(params, "body"),
-		IsHTML:      boolValue(params, "isHtml", false),
-		Attachments: attachments,
+		To:           to,
+		CC:           stringValue(params, "cc"),
+		BCC:          stringValue(params, "bcc"),
+		From:         stringValue(params, "from"),
+		ReplyTo:      stringValue(params, "replyTo"),
+		Subject:      stringValue(params, "subject"),
+		Body:         stringValue(params, "body"),
+		IsHTML:       boolValue(params, "isHtml", false),
+		Attachments:  attachments,
+		AllowEmptyTo: allowEmptyTo,
 	})
 }
 
@@ -440,6 +541,11 @@ func descriptorParamValue(params map[string]any, param Param) (any, bool) {
 			return param.Default, true
 		}
 		return nil, false
+	}
+	if object, ok := value.(map[string]any); ok {
+		if locatorValue, ok := object["value"]; ok {
+			return locatorValue, locatorValue != nil
+		}
 	}
 	return value, true
 }

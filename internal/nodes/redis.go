@@ -152,7 +152,7 @@ func redisCredentialHash(credential redisCredential) string {
 
 func redisSingleOutputOperation(params map[string]any) bool {
 	switch strings.ToLower(stringParam(params, "operation")) {
-	case "keys", "scan", "command":
+	case "info", "scan", "command":
 		return true
 	default:
 		return false
@@ -163,27 +163,34 @@ func redisExecuteItem(ctx context.Context, client *goredis.Client, in engine.Exe
 	operation := strings.ToLower(stringParam(in.Node.Parameters, "operation"))
 	key := redisString(in, items, index, "key")
 	switch operation {
-	case "", "get":
-		value, err := client.Get(ctx, key).Result()
-		if err == goredis.Nil {
-			return redisItem("key", key, "value", nil, "found", false, "exists", false), nil
-		}
+	case "info":
+		value, err := client.Info(ctx).Result()
 		if err != nil {
 			return dataplane.Item{}, err
 		}
-		return redisItem("key", key, "value", redisDecodeValue(in.Node.Parameters, value), "found", true, "exists", true), nil
+		return dataplane.Item{JSON: redisInfoToObject(value)}, nil
+	case "", "get":
+		value, err := redisGetValue(ctx, client, key, stringParam(in.Node.Parameters, "keyType"))
+		if err != nil {
+			return dataplane.Item{}, err
+		}
+		item := dataplane.Item{JSON: map[string]any{}, PairedItem: &dataplane.PairedItem{Item: index}}
+		redisSetOutputValue(item.JSON, stringParamWithDefault(in.Node.Parameters, "propertyName", "propertyName"), value, redisDotNotation(in.Node.Parameters))
+		return item, nil
 	case "set":
 		value := redisValue(in, items, index, "value")
-		encoded, err := redisEncodeValue(in.Node.Parameters, value)
+		if err := redisSetOfficial(ctx, client, in.Node.Parameters, key, value); err != nil {
+			return dataplane.Item{}, err
+		}
+		return cloneItem(items[index]), nil
+	case "delete":
+		deleted, err := client.Del(ctx, key).Result()
 		if err != nil {
 			return dataplane.Item{}, err
 		}
-		success, err := redisSet(ctx, client, in.Node.Parameters, key, encoded)
-		if err != nil {
-			return dataplane.Item{}, err
-		}
-		return redisItem("key", key, "value", value, "success", success), nil
-	case "delete", "del":
+		_ = deleted
+		return cloneItem(items[index]), nil
+	case "del":
 		deleted, err := client.Del(ctx, key).Result()
 		if err != nil {
 			return dataplane.Item{}, err
@@ -212,7 +219,15 @@ func redisExecuteItem(ctx context.Context, client *goredis.Client, in engine.Exe
 		if err != nil {
 			return dataplane.Item{}, err
 		}
-		return redisItem("key", key, "value", value), nil
+		if boolParam(in.Node.Parameters, "expire", false) {
+			ttl := intParam(in.Node.Parameters, "ttl", -1)
+			if ttl > 0 {
+				if err := client.Expire(ctx, key, time.Duration(ttl)*time.Second).Err(); err != nil {
+					return dataplane.Item{}, err
+				}
+			}
+		}
+		return redisItem(key, value), nil
 	case "incrby":
 		value, err := client.IncrBy(ctx, key, int64(redisNumber(in, items, index, "value", 1))).Result()
 		if err != nil {
@@ -231,7 +246,18 @@ func redisExecuteItem(ctx context.Context, client *goredis.Client, in engine.Exe
 		if err != nil {
 			return dataplane.Item{}, err
 		}
-		return redisItem("keys", keys, "count", len(keys)), nil
+		if !boolParam(in.Node.Parameters, "getValues", true) {
+			return redisItem("keys", keys), nil
+		}
+		item := dataplane.Item{JSON: map[string]any{}, PairedItem: &dataplane.PairedItem{Item: index}}
+		for _, keyName := range keys {
+			value, err := redisGetValue(ctx, client, keyName, "automatic")
+			if err != nil {
+				return dataplane.Item{}, err
+			}
+			item.JSON[keyName] = value
+		}
+		return item, nil
 	case "scan":
 		pattern := redisPattern(in, items, index)
 		count := int64(intParam(in.Node.Parameters, "count", 100))
@@ -300,10 +326,44 @@ func redisExecuteItem(ctx context.Context, client *goredis.Client, in engine.Exe
 		return redisListPush(ctx, client, in, items, index, key, true)
 	case "rpush":
 		return redisListPush(ctx, client, in, items, index, key, false)
+	case "push":
+		list := redisString(in, items, index, "list")
+		message := redisString(in, items, index, "messageData")
+		var err error
+		if boolParam(in.Node.Parameters, "tail", false) {
+			_, err = client.RPush(ctx, list, message).Result()
+		} else {
+			_, err = client.LPush(ctx, list, message).Result()
+		}
+		if err != nil {
+			return dataplane.Item{}, err
+		}
+		return cloneItem(items[index]), nil
 	case "lpop":
 		return redisListPop(ctx, client, in.Node.Parameters, key, true)
 	case "rpop":
 		return redisListPop(ctx, client, in.Node.Parameters, key, false)
+	case "pop":
+		list := redisString(in, items, index, "list")
+		propertyName := stringParamWithDefault(in.Node.Parameters, "propertyName", "propertyName")
+		var value string
+		var outputValue any
+		var err error
+		if boolParam(in.Node.Parameters, "tail", false) {
+			value, err = client.RPop(ctx, list).Result()
+		} else {
+			value, err = client.LPop(ctx, list).Result()
+		}
+		if err == goredis.Nil {
+			outputValue = nil
+		} else if err != nil {
+			return dataplane.Item{}, err
+		} else {
+			outputValue = redisDecodeJSONLike(value)
+		}
+		item := dataplane.Item{JSON: map[string]any{}, PairedItem: &dataplane.PairedItem{Item: index}}
+		redisSetOutputValue(item.JSON, propertyName, outputValue, redisDotNotation(in.Node.Parameters))
+		return item, nil
 	case "lrange":
 		values, err := client.LRange(ctx, key, int64(intParam(in.Node.Parameters, "start", 0)), int64(intParam(in.Node.Parameters, "stop", -1))).Result()
 		if err != nil {
@@ -311,11 +371,12 @@ func redisExecuteItem(ctx context.Context, client *goredis.Client, in engine.Exe
 		}
 		return redisItem("key", key, "value", redisDecodeSlice(in.Node.Parameters, values)), nil
 	case "llen":
-		length, err := client.LLen(ctx, key).Result()
+		list := firstNonEmptyNode(redisString(in, items, index, "list"), key)
+		length, err := client.LLen(ctx, list).Result()
 		if err != nil {
 			return dataplane.Item{}, err
 		}
-		return redisItem("key", key, "length", length), nil
+		return dataplane.Item{JSON: map[string]any{list: length}, PairedItem: &dataplane.PairedItem{Item: index}}, nil
 	case "sadd":
 		member, err := redisEncodeValue(in.Node.Parameters, redisValue(in, items, index, "member", "value"))
 		if err != nil {
@@ -389,15 +450,11 @@ func redisExecuteItem(ctx context.Context, client *goredis.Client, in engine.Exe
 		return redisItem("key", key, "score", score), nil
 	case "publish":
 		channel := redisString(in, items, index, "channel")
-		message, err := redisEncodeValue(in.Node.Parameters, redisValue(in, items, index, "message", "value"))
-		if err != nil {
+		message := firstNonNil(redisValue(in, items, index, "messageData"), redisValue(in, items, index, "message", "value"))
+		if err := client.Publish(ctx, channel, fmt.Sprint(message)).Err(); err != nil {
 			return dataplane.Item{}, err
 		}
-		count, err := client.Publish(ctx, channel, message).Result()
-		if err != nil {
-			return dataplane.Item{}, err
-		}
-		return redisItem("channel", channel, "receivers", count, "recipients", count), nil
+		return cloneItem(items[index]), nil
 	case "type":
 		value, err := client.Type(ctx, key).Result()
 		if err != nil {
@@ -428,6 +485,207 @@ func redisExecuteItem(ctx context.Context, client *goredis.Client, in engine.Exe
 	default:
 		return dataplane.Item{}, fmt.Errorf("unsupported redis operation %q", operation)
 	}
+}
+
+func redisGetValue(ctx context.Context, client *goredis.Client, key string, keyType string) (any, error) {
+	keyType = strings.ToLower(firstNonEmptyNode(keyType, "automatic"))
+	if keyType == "automatic" {
+		detected, err := client.Type(ctx, key).Result()
+		if err != nil {
+			return nil, err
+		}
+		keyType = detected
+	}
+	switch keyType {
+	case "string":
+		value, err := client.Get(ctx, key).Result()
+		if err == goredis.Nil {
+			return nil, nil
+		}
+		return value, err
+	case "hash":
+		return client.HGetAll(ctx, key).Result()
+	case "list", "lists":
+		return client.LRange(ctx, key, 0, -1).Result()
+	case "set", "sets":
+		return client.SMembers(ctx, key).Result()
+	default:
+		return nil, nil
+	}
+}
+
+func redisSetOfficial(ctx context.Context, client *goredis.Client, params map[string]any, key string, value any) error {
+	keyType := strings.ToLower(firstNonEmptyNode(stringParam(params, "keyType"), "automatic"))
+	if keyType == "automatic" {
+		switch value.(type) {
+		case []any, []string:
+			keyType = "list"
+		case map[string]any:
+			keyType = "hash"
+		case string:
+			keyType = "string"
+		default:
+			return fmt.Errorf("could not identify redis key type")
+		}
+	}
+	switch keyType {
+	case "string":
+		if err := client.Set(ctx, key, fmt.Sprint(value), 0).Err(); err != nil {
+			return err
+		}
+	case "hash":
+		values, err := redisHashValues(value, boolParam(params, "valueIsJSON", true))
+		if err != nil {
+			return err
+		}
+		if len(values) > 0 {
+			if err := client.HSet(ctx, key, values...).Err(); err != nil {
+				return err
+			}
+		}
+	case "list", "lists":
+		values := redisListValues(value)
+		for index, entry := range values {
+			if err := client.LSet(ctx, key, int64(index), fmt.Sprint(entry)).Err(); err != nil {
+				return err
+			}
+		}
+	case "set", "sets":
+		if err := client.SAdd(ctx, key, redisListValues(value)...).Err(); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported redis key type %q", keyType)
+	}
+	if boolParam(params, "expire", false) {
+		ttl := intParam(params, "ttl", -1)
+		if ttl > 0 {
+			return client.Expire(ctx, key, time.Duration(ttl)*time.Second).Err()
+		}
+	}
+	return nil
+}
+
+func redisHashValues(value any, valueIsJSON bool) ([]any, error) {
+	if !valueIsJSON {
+		parts := strings.Fields(fmt.Sprint(value))
+		values := make([]any, 0, len(parts))
+		for _, part := range parts {
+			values = append(values, part)
+		}
+		return values, nil
+	}
+	if text, ok := value.(string); ok {
+		var decoded any
+		if json.Unmarshal([]byte(text), &decoded) == nil {
+			value = decoded
+		}
+	}
+	object, ok := rawObject(value)
+	if !ok {
+		return []any{fmt.Sprint(value)}, nil
+	}
+	values := make([]any, 0, len(object)*2)
+	for key, entry := range object {
+		values = append(values, key, fmt.Sprint(entry))
+	}
+	return values, nil
+}
+
+func redisListValues(value any) []any {
+	switch typed := value.(type) {
+	case []any:
+		return typed
+	case []string:
+		values := make([]any, 0, len(typed))
+		for _, entry := range typed {
+			values = append(values, entry)
+		}
+		return values
+	case string:
+		return []any{typed}
+	default:
+		return []any{fmt.Sprint(value)}
+	}
+}
+
+func redisInfoToObject(data string) map[string]any {
+	result := map[string]any{}
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if strings.Contains(value, "=") {
+			nested := map[string]any{}
+			for _, pair := range strings.Split(value, ",") {
+				nestedKey, nestedValue, ok := strings.Cut(pair, "=")
+				if !ok {
+					continue
+				}
+				nested[nestedKey] = redisParseInfoValue(nestedValue)
+			}
+			result[key] = nested
+			continue
+		}
+		result[key] = redisParseInfoValue(value)
+	}
+	return result
+}
+
+func redisParseInfoValue(value string) any {
+	value = strings.TrimSpace(value)
+	if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+		return parsed
+	}
+	return value
+}
+
+func redisDotNotation(params map[string]any) bool {
+	options := redisOptions(params)
+	return boolParam(options, "dotNotation", true)
+}
+
+func redisSetOutputValue(target map[string]any, property string, value any, dotNotation bool) {
+	if property == "" {
+		property = "propertyName"
+	}
+	if !dotNotation || !strings.Contains(property, ".") {
+		target[property] = value
+		return
+	}
+	parts := strings.Split(property, ".")
+	current := target
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := current[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			current[part] = next
+		}
+		current = next
+	}
+	current[parts[len(parts)-1]] = value
+}
+
+func redisDecodeJSONLike(value string) any {
+	var decoded any
+	if json.Unmarshal([]byte(value), &decoded) == nil {
+		return decoded
+	}
+	return value
+}
+
+func stringParamWithDefault(params map[string]any, key string, fallback string) string {
+	value := stringParam(params, key)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func redisSet(ctx context.Context, client *goredis.Client, params map[string]any, key string, value any) (bool, error) {

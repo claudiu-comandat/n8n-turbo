@@ -19,7 +19,11 @@ const maxAttachmentBytes = 25 * 1024 * 1024
 
 func (n *Node) buildAttachments(ctx context.Context, params map[string]any, item dataplane.Item) ([]Attachment, error) {
 	out := []Attachment{}
-	for _, property := range stringSlice(params, "binaryPropertyAttachment") {
+	properties := stringSlice(params, "binaryPropertyAttachment")
+	if len(properties) == 0 {
+		properties = stringSlice(nestedMap(params, "additionalFields"), "attachments")
+	}
+	for _, property := range properties {
 		binary, ok := item.Binary[property]
 		if !ok {
 			return nil, fmt.Errorf("binary property %s not found", property)

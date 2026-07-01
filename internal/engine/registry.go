@@ -12,25 +12,33 @@ import (
 )
 
 type ExecuteInput struct {
-	Node          dataplane.Node
-	NextNodes     []dataplane.Node
-	InputData     dataplane.Output
-	RunData       dataplane.RunData
-	Variables     map[string]any
-	Secrets       map[string]map[string]string
-	Credentials   map[string]map[string]any
-	BinaryStore   binarydata.Store
-	WorkflowID    string
-	WorkflowName  string
-	ExecutionID   string
-	ExecutionMode string
-	ResumeURL     string
-	ResumeFormURL string
-	ScheduledTime time.Time
-	RunIndex      int
-	Expr          *expr.Resolver
-	SubWorkflow   SubWorkflowExecutor
-	CallStack     []string
+	Node           dataplane.Node
+	NextNodes      []dataplane.Node
+	InputData      dataplane.Output
+	ConnectedNodes map[string][][]ConnectedNode
+	RunData        dataplane.RunData
+	Variables      map[string]any
+	Secrets        map[string]map[string]string
+	Credentials    map[string]map[string]any
+	BinaryStore    binarydata.Store
+	WorkflowID     string
+	WorkflowName   string
+	ExecutionID    string
+	ExecutionMode  string
+	ResumeURL      string
+	ResumeFormURL  string
+	ScheduledTime  time.Time
+	RunIndex       int
+	Expr           *expr.Resolver
+	SubWorkflow    SubWorkflowExecutor
+	CallStack      []string
+}
+
+type ConnectedNode struct {
+	Node        dataplane.Node
+	Credentials map[string]map[string]any
+	OutputIndex int
+	InputIndex  int
 }
 
 type SubWorkflowExecutor func(context.Context, SubWorkflowRequest) (SubWorkflowResult, error)

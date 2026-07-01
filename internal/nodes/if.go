@@ -20,6 +20,7 @@ type ifCondition struct {
 	Right         any
 	Operation     string
 	CaseSensitive bool
+	LooseType     bool
 }
 
 func (If) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
@@ -32,6 +33,7 @@ func (If) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output
 	falseItems := make([]dataplane.Item, 0)
 	items := firstInput(in.InputData)
 	for index, item := range items {
+		item = itemWithPairedIndex(item, index, false)
 		if conditionMatches(in, items, index, item, in.Node.Parameters) {
 			trueItems = append(trueItems, item)
 		} else {
@@ -94,9 +96,10 @@ func evaluateIFGroups(in engine.ExecuteInput, items []dataplane.Item, itemIndex 
 }
 
 func parseIFConditions(conditions map[string]any) []ifCondition {
+	options, _ := rawObject(conditions["options"])
 	values, ok := conditions["conditions"].([]any)
 	if ok {
-		return parseIFConditionList(values)
+		return parseIFConditionList(values, options)
 	}
 	result := []ifCondition{}
 	for _, key := range []string{"string", "number", "boolean", "dateTime", "date"} {
@@ -109,31 +112,62 @@ func parseIFConditions(conditions map[string]any) []ifCondition {
 			if !ok {
 				continue
 			}
-			condition := parseIFCondition(object)
+			condition := parseIFCondition(object, options)
 			result = append(result, condition)
 		}
 	}
 	return result
 }
 
-func parseIFConditionList(values []any) []ifCondition {
+func parseIFConditionList(values []any, options map[string]any) []ifCondition {
 	result := make([]ifCondition, 0, len(values))
 	for _, value := range values {
 		object, ok := rawObject(value)
 		if ok {
-			result = append(result, parseIFCondition(object))
+			result = append(result, parseIFCondition(object, options))
 		}
 	}
 	return result
 }
 
-func parseIFCondition(object map[string]any) ifCondition {
+func parseIFCondition(object map[string]any, options map[string]any) ifCondition {
 	return ifCondition{
 		Left:          firstPresent(object, "leftValue", "value1"),
 		Right:         firstPresent(object, "rightValue", "value2"),
-		Operation:     firstString(object, "operation", "operator", "type"),
-		CaseSensitive: boolParam(object, "caseSensitive", false),
+		Operation:     ifConditionOperation(object),
+		CaseSensitive: ifConditionCaseSensitive(object, options),
+		LooseType:     ifConditionLooseType(object, options),
 	}
+}
+
+func ifConditionOperation(object map[string]any) string {
+	if operator, ok := rawObject(object["operator"]); ok {
+		return firstString(operator, "operation", "type")
+	}
+	return firstString(object, "operation", "operator", "type")
+}
+
+func ifConditionCaseSensitive(object map[string]any, options map[string]any) bool {
+	if _, ok := object["caseSensitive"]; ok {
+		return boolParam(object, "caseSensitive", false)
+	}
+	if _, ok := options["caseSensitive"]; ok {
+		return boolParam(options, "caseSensitive", true)
+	}
+	if _, ok := options["ignoreCase"]; ok {
+		return !boolParam(options, "ignoreCase", false)
+	}
+	return false
+}
+
+func ifConditionLooseType(object map[string]any, options map[string]any) bool {
+	if _, ok := object["looseTypeValidation"]; ok {
+		return boolParam(object, "looseTypeValidation", true)
+	}
+	if _, ok := options["looseTypeValidation"]; ok {
+		return boolParam(options, "looseTypeValidation", true)
+	}
+	return !strings.EqualFold(stringParam(options, "typeValidation"), "strict")
 }
 
 func evaluateIFConditions(in engine.ExecuteInput, items []dataplane.Item, itemIndex int, conditions []ifCondition) []bool {
@@ -141,7 +175,7 @@ func evaluateIFConditions(in engine.ExecuteInput, items []dataplane.Item, itemIn
 	for _, condition := range conditions {
 		left := resolveValue(in, items, itemIndex, condition.Left)
 		right := resolveValue(in, items, itemIndex, condition.Right)
-		results = append(results, ApplyOperation(left, right, condition.Operation, condition.CaseSensitive, true))
+		results = append(results, ApplyOperation(left, right, condition.Operation, condition.CaseSensitive, condition.LooseType))
 	}
 	return results
 }

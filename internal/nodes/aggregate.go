@@ -30,6 +30,12 @@ type aggregateParams struct {
 	SortField          string
 	SortOrder          string
 	FieldsToAggregate  []aggregateField
+	Include            string
+	FieldsToInclude    []string
+	FieldsToExclude    []string
+	MergeLists         bool
+	IncludeBinaries    bool
+	KeepOnlyUnique     bool
 }
 
 func (Aggregate) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
@@ -42,13 +48,13 @@ func (Aggregate) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane
 	items := firstInput(in.InputData)
 	switch strings.ToLower(params.Mode) {
 	case "", "aggregateallitemdata", "all":
-		return dataplane.MainOutput([]dataplane.Item{{JSON: aggregateAllItems(items, params)}}), nil
+		return dataplane.MainOutput([]dataplane.Item{aggregateOutputItem(aggregateAllItems(items, params), items, params)}), nil
 	case "aggregateindividualfields", "fields", "individual":
 		json, err := aggregateIndividualFields(items, params)
 		if err != nil {
 			return nil, err
 		}
-		return dataplane.MainOutput([]dataplane.Item{{JSON: json}}), nil
+		return dataplane.MainOutput([]dataplane.Item{aggregateOutputItem(json, items, params)}), nil
 	default:
 		return nil, fmt.Errorf("unsupported aggregate mode %q", params.Mode)
 	}
@@ -60,18 +66,60 @@ func parseAggregateParams(raw map[string]any) aggregateParams {
 		Mode:               firstNonEmptyNode(stringParam(raw, "aggregate"), stringParam(raw, "mode"), "aggregateAllItemData"),
 		FieldToAggregate:   stringParam(raw, "fieldToAggregate", "fieldName", "field"),
 		DestinationField:   stringParam(raw, "destinationFieldName", "outputFieldName"),
-		KeepMissingValues:  boolParam(raw, "keepMissingValues", boolParam(options, "keepMissingValues", false)),
+		KeepMissingValues:  boolParam(raw, "keepMissingValues", boolParam(options, "keepMissing", boolParam(options, "keepMissingValues", false))),
 		DisableDotNotation: boolParam(options, "disableDotNotation", boolParam(raw, "disableDotNotation", false)),
 		SortField:          firstNonEmptyNode(stringParam(options, "sortField"), stringParam(raw, "sortField")),
 		SortOrder:          firstNonEmptyNode(stringParam(options, "sortOrder"), stringParam(raw, "sortOrder")),
+		Include:            firstNonEmptyNode(stringParam(raw, "include"), "allFields"),
+		FieldsToInclude:    stringList(raw["fieldsToInclude"]),
+		FieldsToExclude:    stringList(raw["fieldsToExclude"]),
+		MergeLists:         boolParam(options, "mergeLists", boolParam(raw, "mergeLists", false)),
+		IncludeBinaries:    boolParam(options, "includeBinaries", boolParam(raw, "includeBinaries", false)),
+		KeepOnlyUnique:     boolParam(options, "keepOnlyUnique", boolParam(raw, "keepOnlyUnique", false)),
 	}
 	params.FieldsToAggregate = parseAggregateFields(raw["fieldsToAggregate"])
 	return params
 }
 
+func aggregateOutputItem(json map[string]any, items []dataplane.Item, params aggregateParams) dataplane.Item {
+	item := dataplane.Item{JSON: json}
+	if params.IncludeBinaries {
+		item.Binary = aggregateBinaries(items, params.KeepOnlyUnique)
+	}
+	return item
+}
+
+func aggregateBinaries(items []dataplane.Item, uniqueOnly bool) map[string]dataplane.Binary {
+	result := map[string]dataplane.Binary{}
+	seen := map[string]bool{}
+	for _, item := range items {
+		for key, binary := range item.Binary {
+			if uniqueOnly {
+				signature := fmt.Sprintf("%s|%s|%d|%s", binary.MimeType, binary.FileType, binary.FileSize, binary.FileExtension)
+				if seen[signature] {
+					continue
+				}
+				seen[signature] = true
+			}
+			nextKey := key
+			for index := 1; ; index++ {
+				if _, exists := result[nextKey]; !exists {
+					break
+				}
+				nextKey = fmt.Sprintf("%s_%d", key, index)
+			}
+			result[nextKey] = binary
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func parseAggregateFields(raw any) []aggregateField {
 	if object, ok := rawObject(raw); ok {
-		for _, key := range []string{"values", "fields", "field"} {
+		for _, key := range []string{"fieldToAggregate", "values", "fields", "field"} {
 			if values, ok := object[key].([]any); ok {
 				return parseAggregateFieldList(values)
 			}
@@ -103,8 +151,8 @@ func parseAggregateFieldList(values []any) []aggregateField {
 
 func parseAggregateField(object map[string]any) aggregateField {
 	return aggregateField{
-		Field:        stringParam(object, "aggregateField", "field", "fieldName"),
-		Rename:       stringParam(object, "renameField", "outputFieldName"),
+		Field:        stringParam(object, "fieldToAggregate", "aggregateField", "field", "fieldName"),
+		Rename:       stringParam(object, "outputFieldName"),
 		Aggregation:  firstNonEmptyNode(stringParam(object, "aggregation", "operation"), "append"),
 		IncludeEmpty: boolParam(object, "includeEmpty", false),
 		Separator:    firstNonEmptyNode(stringParam(object, "separatorForConcatenate", "separator"), ","),
@@ -117,8 +165,10 @@ func aggregateAllItems(items []dataplane.Item, params aggregateParams) map[strin
 		value := any(item.JSON)
 		if params.FieldToAggregate != "" {
 			value = aggregateFieldValue(item.JSON, params.FieldToAggregate, params.DisableDotNotation)
+		} else {
+			value = aggregateFilteredItem(item.JSON, params)
 		}
-		if value == nil && !params.KeepMissingValues {
+		if emptyIFValue(value) && !params.KeepMissingValues {
 			continue
 		}
 		values = append(values, deepCopySetValue(value))
@@ -127,7 +177,33 @@ func aggregateAllItems(items []dataplane.Item, params aggregateParams) map[strin
 	if field == "" {
 		field = firstNonEmptyNode(params.FieldToAggregate, "data")
 	}
-	return map[string]any{field: values, "count": len(values)}
+	return map[string]any{field: values}
+}
+
+func aggregateFilteredItem(source map[string]any, params aggregateParams) map[string]any {
+	include := strings.ToLower(params.Include)
+	if include != "specifiedfields" && include != "allfieldsexcept" {
+		return source
+	}
+	allowed := map[string]bool{}
+	for _, field := range params.FieldsToInclude {
+		allowed[field] = true
+	}
+	excluded := map[string]bool{}
+	for _, field := range params.FieldsToExclude {
+		excluded[field] = true
+	}
+	result := map[string]any{}
+	for key, value := range source {
+		if include == "specifiedfields" && !allowed[key] {
+			continue
+		}
+		if include == "allfieldsexcept" && excluded[key] {
+			continue
+		}
+		result[key] = value
+	}
+	return result
 }
 
 func aggregateIndividualFields(items []dataplane.Item, params aggregateParams) (map[string]any, error) {
@@ -141,8 +217,12 @@ func aggregateIndividualFields(items []dataplane.Item, params aggregateParams) (
 		if err != nil {
 			return nil, fmt.Errorf("aggregate field %q: %w", field.Field, err)
 		}
-		output := firstNonEmptyNode(field.Rename, field.Field)
-		result[output] = aggregated
+		output := aggregateOutputFieldName(field, params)
+		if !params.DisableDotNotation && strings.Contains(output, ".") {
+			setNestedSetValue(result, output, aggregated)
+		} else {
+			result[output] = aggregated
+		}
 	}
 	return result, nil
 }
@@ -167,7 +247,18 @@ func collectAggregateValues(items []dataplane.Item, field aggregateField, params
 	values := make([]any, 0, len(items))
 	for _, item := range items {
 		value := aggregateFieldValue(item.JSON, field.Field, params.DisableDotNotation)
-		if emptyIFValue(value) && !field.IncludeEmpty && !params.KeepMissingValues {
+		if !field.IncludeEmpty && !params.KeepMissingValues {
+			if values, ok := value.([]any); ok {
+				value = aggregateRemoveMissingValues(values)
+			}
+			if value == nil {
+				continue
+			}
+		}
+		if arrayValues, ok := value.([]any); ok && params.MergeLists {
+			for _, value := range arrayValues {
+				values = append(values, value)
+			}
 			continue
 		}
 		values = append(values, value)
@@ -180,6 +271,27 @@ func aggregateFieldValue(data map[string]any, field string, disableDotNotation b
 		return nestedMergeValue(data, field)
 	}
 	return data[field]
+}
+
+func aggregateOutputFieldName(field aggregateField, params aggregateParams) string {
+	if field.Rename != "" {
+		return field.Rename
+	}
+	if !params.DisableDotNotation && strings.Contains(field.Field, ".") {
+		parts := strings.Split(field.Field, ".")
+		return parts[len(parts)-1]
+	}
+	return field.Field
+}
+
+func aggregateRemoveMissingValues(values []any) []any {
+	result := make([]any, 0, len(values))
+	for _, value := range values {
+		if value != nil {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func applyAggregateOperation(values []any, field aggregateField) (any, error) {

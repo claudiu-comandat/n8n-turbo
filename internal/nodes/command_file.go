@@ -26,9 +26,6 @@ type ReadWriteFile struct{}
 func (ExecuteCommand) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
 	params := executeCommandParams(in.Node.Parameters)
 	command := params.Command
-	if command == "" {
-		return dataplane.MainOutput(firstInput(in.InputData)), nil
-	}
 	items := firstInput(in.InputData)
 	if len(items) == 0 {
 		items = []dataplane.Item{{JSON: map[string]any{}}}
@@ -39,6 +36,7 @@ func (ExecuteCommand) Execute(ctx context.Context, in engine.ExecuteInput) (data
 		if err != nil {
 			return nil, err
 		}
+		item.PairedItem = &dataplane.PairedItem{Item: 0}
 		return dataplane.MainOutput([]dataplane.Item{item}), nil
 	}
 	output := make([]dataplane.Item, 0, len(items))
@@ -48,6 +46,7 @@ func (ExecuteCommand) Execute(ctx context.Context, in engine.ExecuteInput) (data
 		if err != nil {
 			return nil, fmt.Errorf("execute command item %d: %w", index, err)
 		}
+		item.PairedItem = &dataplane.PairedItem{Item: index}
 		output = append(output, item)
 	}
 	return dataplane.MainOutput(output), nil
@@ -81,7 +80,7 @@ func executeCommandParams(params map[string]any) executeCommandConfig {
 	}
 	return executeCommandConfig{
 		Command:          stringParam(params, "command"),
-		ExecuteOnce:      boolParam(params, "executeOnce", boolParam(options, "executeOnce", false)),
+		ExecuteOnce:      boolParam(params, "executeOnce", boolParam(options, "executeOnce", true)),
 		WorkingDirectory: firstNonEmptyNode(stringParam(options, "workingDirectory"), stringParam(params, "workingDirectory"), stringParam(options, "cwd"), stringParam(params, "cwd")),
 		Timeout:          time.Duration(timeoutMS) * time.Millisecond,
 		Environment:      executeCommandEnvironment(params, options),
@@ -138,7 +137,7 @@ func runShellCommand(ctx context.Context, params executeCommandConfig, command s
 		}
 		return dataplane.Item{}, err
 	}
-	return dataplane.Item{JSON: map[string]any{"stdout": stdout.String(), "stderr": stderr.String(), "exitCode": exitCode}}, nil
+	return dataplane.Item{JSON: map[string]any{"stdout": strings.TrimSpace(stdout.String()), "stderr": strings.TrimSpace(stderr.String()), "exitCode": exitCode}}, nil
 }
 
 func (w *limitedCommandWriter) Write(data []byte) (int, error) {
@@ -220,11 +219,11 @@ func (ReadWriteFile) Execute(ctx context.Context, in engine.ExecuteInput) (datap
 			return nil, ctx.Err()
 		default:
 		}
-		result, err := executeReadWriteFileItem(ctx, in, params, items, item, index)
+		results, err := executeReadWriteFileItems(ctx, in, params, items, item, index)
 		if err != nil {
 			return nil, fmt.Errorf("readWriteFile item %d: %w", index, err)
 		}
-		output = append(output, result)
+		output = append(output, results...)
 	}
 	return dataplane.MainOutput(output), nil
 }
@@ -247,18 +246,26 @@ type readWriteFileConfig struct {
 
 func readWriteFileParams(params map[string]any) readWriteFileConfig {
 	options := mergeObject(params["options"])
+	operation := firstNonEmptyNode(stringParam(params, "operation"), "read")
+	filePath := stringParam(params, "filePath", "path")
+	if strings.EqualFold(operation, "read") {
+		filePath = firstNonEmptyNode(filePath, stringParam(params, "fileSelector"))
+	}
+	if strings.EqualFold(operation, "write") {
+		filePath = firstNonEmptyNode(filePath, stringParam(params, "fileName"))
+	}
 	maxSize := int64(intParam(options, "maxFileSize", intParam(params, "maxFileSize", 50*1024*1024)))
 	if maxSize <= 0 {
 		maxSize = 50 * 1024 * 1024
 	}
 	return readWriteFileConfig{
-		Operation:       firstNonEmptyNode(stringParam(params, "operation"), "read"),
-		FilePath:        stringParam(params, "filePath", "path"),
+		Operation:       operation,
+		FilePath:        filePath,
 		NewPath:         stringParam(params, "newPath", "destinationPath", "targetPath"),
 		DataProperty:    firstNonEmptyNode(stringParam(params, "dataPropertyName", "binaryPropertyName", "binaryProperty"), "data"),
 		WriteToFile:     firstNonEmptyNode(stringParam(params, "writeToFile", "source"), "binary"),
 		TextContent:     firstNonNil(params["textContent"], params["content"], params["data"]),
-		Append:          boolParam(params, "appendToFile", boolParam(options, "appendToFile", false)),
+		Append:          boolParam(params, "appendToFile", boolParam(options, "appendToFile", boolParam(options, "append", false))),
 		ReturnObjType:   firstNonEmptyNode(stringParam(options, "returnObjType"), stringParam(params, "returnObjType"), "binary"),
 		OutputProperty:  firstNonEmptyNode(stringParam(options, "dataPropertyName"), stringParam(params, "outputPropertyName"), "data"),
 		FileName:        stringParam(options, "fileName"),
@@ -268,45 +275,93 @@ func readWriteFileParams(params map[string]any) readWriteFileConfig {
 	}
 }
 
-func executeReadWriteFileItem(ctx context.Context, in engine.ExecuteInput, params readWriteFileConfig, items []dataplane.Item, item dataplane.Item, index int) (dataplane.Item, error) {
+func executeReadWriteFileItems(ctx context.Context, in engine.ExecuteInput, params readWriteFileConfig, items []dataplane.Item, item dataplane.Item, index int) ([]dataplane.Item, error) {
 	path, err := resolveReadWritePath(in, params.FilePath, items, index, params.AllowedPaths)
 	if err != nil {
-		return dataplane.Item{}, err
+		return nil, err
 	}
 	switch strings.ToLower(params.Operation) {
 	case "read":
-		return readFileItem(ctx, in, params, path)
+		return readFileItems(ctx, in, params, path, index)
 	case "write":
-		return writeFileItem(ctx, in, params, items, item, index, path)
+		return singleReadWriteResult(writeFileItem(ctx, in, params, items, item, index, path))
 	case "delete":
-		return deleteFileItem(path)
+		item, err := deleteFileItem(path)
+		return singleReadWriteResult(pairReadWriteItem(index, item, err))
 	case "rename", "move":
 		newPath, err := resolveReadWritePath(in, params.NewPath, items, index, params.AllowedPaths)
 		if err != nil {
-			return dataplane.Item{}, err
+			return nil, err
 		}
 		if err := os.MkdirAll(filepath.Dir(newPath), 0o750); err != nil {
-			return dataplane.Item{}, err
+			return nil, err
 		}
 		if err := os.Rename(path, newPath); err != nil {
-			return dataplane.Item{}, err
+			return nil, err
 		}
-		return dataplane.Item{JSON: map[string]any{"oldPath": path, "newPath": newPath, "moved": true}}, nil
+		return []dataplane.Item{{JSON: map[string]any{"oldPath": path, "newPath": newPath, "moved": true}, PairedItem: &dataplane.PairedItem{Item: index}}}, nil
 	case "copy":
 		newPath, err := resolveReadWritePath(in, params.NewPath, items, index, params.AllowedPaths)
 		if err != nil {
-			return dataplane.Item{}, err
+			return nil, err
 		}
 		written, err := copyFile(path, newPath)
 		if err != nil {
-			return dataplane.Item{}, err
+			return nil, err
 		}
-		return dataplane.Item{JSON: map[string]any{"srcPath": path, "dstPath": newPath, "bytesCopied": written}}, nil
+		return []dataplane.Item{{JSON: map[string]any{"srcPath": path, "dstPath": newPath, "bytesCopied": written}, PairedItem: &dataplane.PairedItem{Item: index}}}, nil
 	case "list":
-		return listDirectoryItem(path)
+		item, err := listDirectoryItem(path)
+		return singleReadWriteResult(pairReadWriteItem(index, item, err))
 	default:
-		return dataplane.Item{}, fmt.Errorf("unsupported readWriteFile operation %s", params.Operation)
+		return nil, fmt.Errorf("unsupported readWriteFile operation %s", params.Operation)
 	}
+}
+
+func singleReadWriteResult(item dataplane.Item, err error) ([]dataplane.Item, error) {
+	if err != nil {
+		return nil, err
+	}
+	return []dataplane.Item{item}, nil
+}
+
+func pairReadWriteItem(index int, item dataplane.Item, err error) (dataplane.Item, error) {
+	if err != nil {
+		return dataplane.Item{}, err
+	}
+	item.PairedItem = &dataplane.PairedItem{Item: index}
+	return item, nil
+}
+
+func readFileItems(ctx context.Context, in engine.ExecuteInput, params readWriteFileConfig, selector string, itemIndex int) ([]dataplane.Item, error) {
+	paths := []string{selector}
+	if hasGlobMeta(selector) {
+		matches, err := filepath.Glob(filepath.FromSlash(selector))
+		if err != nil {
+			return nil, err
+		}
+		paths = matches
+	}
+	if len(paths) == 0 {
+		if in.Node.TypeVersion > 1 {
+			return nil, fmt.Errorf("no file matching selector %q found", selector)
+		}
+		return []dataplane.Item{}, nil
+	}
+	result := make([]dataplane.Item, 0, len(paths))
+	for _, path := range paths {
+		item, err := readFileItem(ctx, in, params, path)
+		if err != nil {
+			return nil, err
+		}
+		item.PairedItem = &dataplane.PairedItem{Item: itemIndex}
+		result = append(result, item)
+	}
+	return result, nil
+}
+
+func hasGlobMeta(value string) bool {
+	return strings.ContainsAny(value, "*?[")
 }
 
 func readFileItem(ctx context.Context, in engine.ExecuteInput, params readWriteFileConfig, path string) (dataplane.Item, error) {
@@ -334,7 +389,7 @@ func readFileItem(ctx context.Context, in engine.ExecuteInput, params readWriteF
 		}
 		binary = binarydata.BinaryFromRef(ref)
 	}
-	return dataplane.Item{JSON: map[string]any{"filePath": path, "fileName": fileName, "fileSize": int64(len(data))}, Binary: map[string]dataplane.Binary{params.OutputProperty: binary}}, nil
+	return dataplane.Item{JSON: map[string]any{"mimeType": binary.MimeType, "fileName": binary.FileName, "fileExtension": binary.FileExtension, "fileSize": binary.FileSize}, Binary: map[string]dataplane.Binary{params.OutputProperty: binary}}, nil
 }
 
 func writeFileItem(ctx context.Context, in engine.ExecuteInput, params readWriteFileConfig, items []dataplane.Item, item dataplane.Item, index int, path string) (dataplane.Item, error) {
@@ -369,11 +424,14 @@ func writeFileItem(ctx context.Context, in engine.ExecuteInput, params readWrite
 		return dataplane.Item{}, err
 	}
 	defer file.Close()
-	written, err := file.Write(data)
+	_, err = file.Write(data)
 	if err != nil {
 		return dataplane.Item{}, err
 	}
-	return dataplane.Item{JSON: map[string]any{"filePath": path, "bytesWritten": written, "appended": params.Append}}, nil
+	next := cloneItem(item)
+	next.JSON["fileName"] = path
+	next.PairedItem = &dataplane.PairedItem{Item: index}
+	return next, nil
 }
 
 func deleteFileItem(path string) (dataplane.Item, error) {

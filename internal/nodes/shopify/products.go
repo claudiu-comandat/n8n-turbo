@@ -14,7 +14,7 @@ func (n *Node) handleProduct(ctx context.Context, cred Credential, operation str
 	case OpGetAll, "list":
 		return n.listProducts(ctx, cred, params)
 	case OpGet:
-		id := int64Param(params, "productId")
+		id := firstInt64(params, "productId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("productId is required")
 		}
@@ -25,7 +25,7 @@ func (n *Node) handleProduct(ctx context.Context, cred Credential, operation str
 	case OpUpdate:
 		return singleValue(n.updateProduct(ctx, cred, params))
 	case OpDelete:
-		id := int64Param(params, "productId")
+		id := firstInt64(params, "productId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("productId is required")
 		}
@@ -77,7 +77,7 @@ func (n *Node) createProduct(ctx context.Context, cred Credential, params map[st
 }
 
 func (n *Node) updateProduct(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
-	id := int64Param(params, "productId")
+	id := firstInt64(params, "productId", "id")
 	if id == 0 {
 		return nil, fmt.Errorf("productId is required")
 	}
@@ -114,6 +114,17 @@ func productBody(params map[string]any, item dataplane.Item, partial bool) (map[
 	} {
 		setString(product, key, stringParam(params, param))
 	}
+	extraKey := "additionalFields"
+	if partial {
+		extraKey = "updateFields"
+	}
+	if extra, err := mapParam(params, extraKey); err != nil {
+		return nil, err
+	} else {
+		for key, value := range extra {
+			product[key] = value
+		}
+	}
 	if product["title"] == nil && item.JSON["title"] != nil {
 		product["title"] = item.JSON["title"]
 	}
@@ -141,14 +152,14 @@ func productBody(params map[string]any, item dataplane.Item, partial bool) (map[
 func (n *Node) handleVariant(ctx context.Context, cred Credential, operation string, params map[string]any) ([]dataplane.Item, error) {
 	switch operation {
 	case OpGet:
-		id := int64Param(params, "variantId")
+		id := firstInt64(params, "variantId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("variantId is required")
 		}
 		result, err := n.doJSON(ctx, cred, http.MethodGet, fmt.Sprintf("/variants/%d.json", id), nil)
 		return singleValue(result["variant"], err)
 	case OpCreate:
-		productID := int64Param(params, "productId")
+		productID := firstInt64(params, "productId", "idProduct")
 		if productID == 0 {
 			return nil, fmt.Errorf("productId is required")
 		}
@@ -163,7 +174,7 @@ func (n *Node) handleVariant(ctx context.Context, cred Credential, operation str
 		result, err := n.doJSON(ctx, cred, http.MethodPost, fmt.Sprintf("/products/%d/variants.json", productID), map[string]any{"variant": variant})
 		return singleValue(result["variant"], err)
 	case OpUpdate:
-		id := int64Param(params, "variantId")
+		id := firstInt64(params, "variantId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("variantId is required")
 		}
@@ -179,8 +190,8 @@ func (n *Node) handleVariant(ctx context.Context, cred Credential, operation str
 		result, err := n.doJSON(ctx, cred, http.MethodPut, fmt.Sprintf("/variants/%d.json", id), map[string]any{"variant": variant})
 		return singleValue(result["variant"], err)
 	case OpDelete:
-		productID := int64Param(params, "productId")
-		variantID := int64Param(params, "variantId")
+		productID := firstInt64(params, "productId", "idProduct")
+		variantID := firstInt64(params, "variantId", "id")
 		if productID == 0 || variantID == 0 {
 			return nil, fmt.Errorf("productId and variantId are required")
 		}

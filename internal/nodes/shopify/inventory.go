@@ -25,8 +25,8 @@ func (n *Node) handleInventory(ctx context.Context, cred Credential, operation s
 }
 
 func (n *Node) getInventoryLevel(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
-	inventoryItemID := int64Param(params, "inventoryItemId")
-	locationID := int64Param(params, "locationId")
+	inventoryItemID := firstInt64(params, "inventoryItemId", "idInventoryItem")
+	locationID := firstInt64(params, "locationId", "idLocation")
 	if inventoryItemID == 0 || locationID == 0 {
 		return nil, fmt.Errorf("inventoryItemId and locationId are required")
 	}
@@ -47,10 +47,10 @@ func (n *Node) getInventoryLevel(ctx context.Context, cred Credential, params ma
 
 func (n *Node) listInventoryLevels(ctx context.Context, cred Credential, params map[string]any) ([]dataplane.Item, error) {
 	query := url.Values{}
-	if value := int64Param(params, "inventoryItemId"); value != 0 {
+	if value := firstInt64(params, "inventoryItemId", "idInventoryItem"); value != 0 {
 		query.Set("inventory_item_ids", fmt.Sprint(value))
 	}
-	if value := int64Param(params, "locationId"); value != 0 {
+	if value := firstInt64(params, "locationId", "idLocation"); value != 0 {
 		query.Set("location_ids", fmt.Sprint(value))
 	}
 	limit := intParam(params, "limit")
@@ -64,8 +64,8 @@ func (n *Node) listInventoryLevels(ctx context.Context, cred Credential, params 
 
 func (n *Node) adjustInventory(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
 	body := map[string]any{
-		"location_id":          int64Param(params, "locationId"),
-		"inventory_item_id":    int64Param(params, "inventoryItemId"),
+		"location_id":          firstInt64(params, "locationId", "idLocation"),
+		"inventory_item_id":    firstInt64(params, "inventoryItemId", "idInventoryItem"),
 		"available_adjustment": intParam(params, "adjustment"),
 	}
 	if body["location_id"] == int64(0) || body["inventory_item_id"] == int64(0) {
@@ -83,8 +83,8 @@ func (n *Node) adjustInventory(ctx context.Context, cred Credential, params map[
 
 func (n *Node) setInventory(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
 	body := map[string]any{
-		"location_id":       int64Param(params, "locationId"),
-		"inventory_item_id": int64Param(params, "inventoryItemId"),
+		"location_id":       firstInt64(params, "locationId", "idLocation"),
+		"inventory_item_id": firstInt64(params, "inventoryItemId", "idInventoryItem"),
 		"available":         intParam(params, "available"),
 	}
 	if body["location_id"] == int64(0) || body["inventory_item_id"] == int64(0) {

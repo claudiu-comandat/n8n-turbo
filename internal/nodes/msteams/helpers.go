@@ -12,13 +12,22 @@ import (
 func stringValue(params map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := params[key]; ok {
-			text := strings.TrimSpace(fmt.Sprint(value))
+			text := strings.TrimSpace(textValue(value))
 			if text != "" && text != "<nil>" {
 				return text
 			}
 		}
 	}
 	return ""
+}
+
+func textValue(value any) string {
+	if object, ok := value.(map[string]any); ok {
+		if raw, ok := object["value"]; ok {
+			return textValue(raw)
+		}
+	}
+	return fmt.Sprint(value)
 }
 
 func intValue(params map[string]any, key string) int {
@@ -62,6 +71,13 @@ func boolValue(params map[string]any, key string, def bool) bool {
 	return def
 }
 
+func mapParam(params map[string]any, key string) map[string]any {
+	if value, ok := params[key].(map[string]any); ok {
+		return value
+	}
+	return map[string]any{}
+}
+
 func stringSlice(params map[string]any, key string) []string {
 	value, ok := params[key]
 	if !ok {
@@ -73,7 +89,7 @@ func stringSlice(params map[string]any, key string) []string {
 	case []any:
 		out := []string{}
 		for _, item := range typed {
-			text := strings.TrimSpace(fmt.Sprint(item))
+			text := strings.TrimSpace(textValue(item))
 			if text != "" {
 				out = append(out, text)
 			}

@@ -19,6 +19,7 @@ import (
 	"github.com/n8n-io/n8n-turbo/internal/binarydata"
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 	"github.com/n8n-io/n8n-turbo/internal/engine"
+	"github.com/n8n-io/n8n-turbo/internal/expr"
 )
 
 type HTTPRequest struct{}
@@ -39,44 +40,20 @@ func (HTTPRequest) Execute(ctx context.Context, in engine.ExecuteInput) (datapla
 			case <-time.After(time.Duration(batchInterval) * time.Millisecond):
 			}
 		}
-		resp, err := doHTTPRequestWithRetry(ctx, &client, in, items, index)
+		pageItems, err := executeHTTPItemWithPagination(ctx, &client, in, items, index)
 		if err != nil {
 			return nil, err
 		}
-		if httpResponseFormat(in.Node.Parameters) == "binary" || httpResponseFormat(in.Node.Parameters) == "file" {
-			if resp.StatusCode >= 400 && !httpNeverError(in.Node.Parameters) {
-				body, readErr := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
-				_ = resp.Body.Close()
-				if readErr != nil {
-					return nil, readErr
-				}
-				return nil, fmt.Errorf("http request failed with status %d: %s", resp.StatusCode, string(body))
-			}
-			item, itemErr := httpBinaryResponseItem(ctx, resp, in.Node.Parameters, in.BinaryStore)
-			_ = resp.Body.Close()
-			if itemErr != nil {
-				return nil, itemErr
-			}
-			output = append(output, item)
-			continue
-		}
-		reader := io.Reader(resp.Body)
-		reader = io.LimitReader(resp.Body, 16*1024*1024)
-		body, readErr := io.ReadAll(reader)
-		_ = resp.Body.Close()
-		if readErr != nil {
-			return nil, readErr
-		}
-		if resp.StatusCode >= 400 && !httpNeverError(in.Node.Parameters) {
-			return nil, fmt.Errorf("http request failed with status %d: %s", resp.StatusCode, string(body))
-		}
-		item := httpResponseItem(resp, body, in.Node.Parameters)
-		output = append(output, item)
+		output = append(output, pageItems...)
 	}
 	return dataplane.MainOutput(output), nil
 }
 
 func doHTTPRequestWithRetry(ctx context.Context, client *http.Client, in engine.ExecuteInput, items []dataplane.Item, index int) (*http.Response, error) {
+	return doHTTPRequestWithRetryAndQuery(ctx, client, in, items, index, nil)
+}
+
+func doHTTPRequestWithRetryAndQuery(ctx context.Context, client *http.Client, in engine.ExecuteInput, items []dataplane.Item, index int, extraQuery map[string]any) (*http.Response, error) {
 	maxTries := httpRetryMaxTries(in.Node.Parameters)
 	wait := httpRetryWait(in.Node.Parameters)
 	var lastErr error
@@ -88,7 +65,7 @@ func doHTTPRequestWithRetry(ctx context.Context, client *http.Client, in engine.
 			case <-time.After(time.Duration(wait) * time.Millisecond):
 			}
 		}
-		req, err := httpRequestForItem(ctx, in, items, index)
+		req, err := httpRequestForItemWithQuery(ctx, in, items, index, extraQuery)
 		if err != nil {
 			return nil, err
 		}
@@ -106,7 +83,73 @@ func doHTTPRequestWithRetry(ctx context.Context, client *http.Client, in engine.
 	return nil, lastErr
 }
 
+func executeHTTPItemWithPagination(ctx context.Context, client *http.Client, in engine.ExecuteInput, items []dataplane.Item, index int) ([]dataplane.Item, error) {
+	config := httpPaginationConfig(in.Node.Parameters)
+	pageCount := 0
+	extraQuery := map[string]any(nil)
+	result := []dataplane.Item{}
+	for {
+		resp, err := doHTTPRequestWithRetryAndQuery(ctx, client, in, items, index, extraQuery)
+		if err != nil {
+			return nil, err
+		}
+		item, responseBody, err := httpResponsePageItem(ctx, resp, in)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+		if !config.enabled {
+			return result, nil
+		}
+		pageCount++
+		if config.maxRequests > 0 && pageCount >= config.maxRequests {
+			return result, nil
+		}
+		if config.completeExpression != "" && httpPaginationComplete(in, items, index, pageCount, responseBody, item, config.completeExpression) {
+			return result, nil
+		}
+		nextQuery := httpPaginationQuery(in, items, index, pageCount, responseBody, item, config.parameters)
+		if len(nextQuery) == 0 {
+			return result, nil
+		}
+		extraQuery = nextQuery
+	}
+}
+
+func httpResponsePageItem(ctx context.Context, resp *http.Response, in engine.ExecuteInput) (dataplane.Item, any, error) {
+	if httpResponseFormat(in.Node.Parameters) == "binary" || httpResponseFormat(in.Node.Parameters) == "file" {
+		if resp.StatusCode >= 400 && !httpNeverError(in.Node.Parameters) {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+			_ = resp.Body.Close()
+			if readErr != nil {
+				return dataplane.Item{}, nil, readErr
+			}
+			return dataplane.Item{}, nil, fmt.Errorf("http request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+		item, itemErr := httpBinaryResponseItem(ctx, resp, in.Node.Parameters, in.BinaryStore)
+		_ = resp.Body.Close()
+		if itemErr != nil {
+			return dataplane.Item{}, nil, itemErr
+		}
+		return item, item.JSON["body"], nil
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return dataplane.Item{}, nil, readErr
+	}
+	if resp.StatusCode >= 400 && !httpNeverError(in.Node.Parameters) {
+		return dataplane.Item{}, nil, fmt.Errorf("http request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+	item := httpResponseItem(resp, body, in.Node.Parameters)
+	return item, httpPaginationBody(body, item), nil
+}
+
 func httpRequestForItem(ctx context.Context, in engine.ExecuteInput, items []dataplane.Item, index int) (*http.Request, error) {
+	return httpRequestForItemWithQuery(ctx, in, items, index, nil)
+}
+
+func httpRequestForItemWithQuery(ctx context.Context, in engine.ExecuteInput, items []dataplane.Item, index int, extraQuery map[string]any) (*http.Request, error) {
 	rawURLValue := resolveValue(in, items, index, in.Node.Parameters["url"])
 	if rawURLValue == nil {
 		return nil, fmt.Errorf("url is required: expression resolved to empty value")
@@ -124,6 +167,9 @@ func httpRequestForItem(ctx context.Context, in engine.ExecuteInput, items []dat
 	}
 	query := parsed.Query()
 	for key, value := range httpRequestQuery(in, items, index, in.Node.Parameters) {
+		query.Set(key, fmt.Sprint(value))
+	}
+	for key, value := range extraQuery {
 		query.Set(key, fmt.Sprint(value))
 	}
 	parsed.RawQuery = query.Encode()
@@ -156,6 +202,9 @@ func httpRequestForItem(ctx context.Context, in engine.ExecuteInput, items []dat
 }
 
 func httpBody(in engine.ExecuteInput, items []dataplane.Item, index int) (io.Reader, string, error) {
+	if _, ok := in.Node.Parameters["sendBody"]; ok && !boolParam(in.Node.Parameters, "sendBody", false) {
+		return nil, "", nil
+	}
 	contentTypeMode := strings.ToLower(firstNonEmptyNode(stringParam(in.Node.Parameters, "contentType"), stringParam(in.Node.Parameters, "bodyContentTypeMode")))
 	specifyBody := strings.ToLower(stringParam(in.Node.Parameters, "specifyBody"))
 	if contentTypeMode == "form-urlencoded" || contentTypeMode == "formurlencoded" {
@@ -167,7 +216,7 @@ func httpBody(in engine.ExecuteInput, items []dataplane.Item, index int) (io.Rea
 			return strings.NewReader(fmt.Sprint(body)), "application/x-www-form-urlencoded", nil
 		}
 		values := url.Values{}
-		for key, value := range httpNameValueMap(in, items, index, in.Node.Parameters["bodyParameters"]) {
+		for key, value := range httpNameValueMap(in, items, index, httpFirstPresent(in.Node.Parameters, "bodyParameters", "bodyParametersUi")) {
 			values.Set(key, fmt.Sprint(value))
 		}
 		return strings.NewReader(values.Encode()), "application/x-www-form-urlencoded", nil
@@ -175,7 +224,7 @@ func httpBody(in engine.ExecuteInput, items []dataplane.Item, index int) (io.Rea
 	if contentTypeMode == "multipart-form-data" || contentTypeMode == "multipart" {
 		var buffer bytes.Buffer
 		writer := multipart.NewWriter(&buffer)
-		for _, entry := range httpCollectionEntries(in, items, index, in.Node.Parameters["bodyParameters"]) {
+		for _, entry := range httpCollectionEntries(in, items, index, httpFirstPresent(in.Node.Parameters, "bodyParameters", "bodyParametersUi")) {
 			if strings.EqualFold(stringParam(entry, "parameterType"), "formBinaryData") {
 				fieldName := firstNonEmptyNode(stringParam(entry, "name"), stringParam(entry, "key"))
 				binaryProperty := stringParam(entry, "inputDataFieldName")
@@ -225,14 +274,24 @@ func httpBody(in engine.ExecuteInput, items []dataplane.Item, index int) (io.Rea
 		if value == nil {
 			return nil, firstNonEmptyNode(stringParam(in.Node.Parameters, "rawContentType"), "text/plain"), nil
 		}
-		return strings.NewReader(fmt.Sprint(value)), firstNonEmptyNode(stringParam(in.Node.Parameters, "rawContentType"), "text/plain"), nil
+		if text, ok := value.(string); ok {
+			return strings.NewReader(text), firstNonEmptyNode(stringParam(in.Node.Parameters, "rawContentType"), "text/plain"), nil
+		}
+		bytes, err := json.Marshal(value)
+		if err != nil {
+			return nil, "", err
+		}
+		return bytesReader(bytes), firstNonEmptyNode(stringParam(in.Node.Parameters, "rawContentType"), "text/plain"), nil
 	}
 	raw, ok := in.Node.Parameters["body"]
 	if !ok || (specifyBody == "json" && strings.EqualFold(contentTypeMode, "json")) {
-		raw = in.Node.Parameters["jsonBody"]
+		raw = httpFirstPresent(in.Node.Parameters, "jsonBody", "bodyParametersJson")
 	}
 	if raw == nil {
-		bodyParameters := httpNameValueMap(in, items, index, in.Node.Parameters["bodyParameters"])
+		bodyParameters := httpNameValueMap(in, items, index, httpFirstPresent(in.Node.Parameters, "bodyParameters", "bodyParametersUi"))
+		for key, value := range httpMap(in, items, index, in.Node.Parameters["bodyParametersJson"]) {
+			bodyParameters[key] = value
+		}
 		if len(bodyParameters) > 0 {
 			bytes, err := json.Marshal(bodyParameters)
 			if err != nil {
@@ -371,6 +430,15 @@ func httpCollectionEntries(in engine.ExecuteInput, items []dataplane.Item, index
 		}
 		return result
 	}
+	if entries, ok := object["parameter"].([]any); ok {
+		result := make([]map[string]any, 0, len(entries))
+		for _, entry := range entries {
+			if entryObject, ok := rawObject(entry); ok {
+				result = append(result, entryObject)
+			}
+		}
+		return result
+	}
 	return nil
 }
 
@@ -500,22 +568,167 @@ func httpFullResponse(params map[string]any) bool {
 }
 
 func httpResponseFormat(params map[string]any) string {
-	return strings.ToLower(firstNonEmptyNode(
+	format := strings.ToLower(firstNonEmptyNode(
 		stringParam(httpOptionGroup(params, "response"), "responseFormat"),
 		stringParam(params, "responseFormat"),
 	))
+	if format == "string" {
+		return "text"
+	}
+	return format
+}
+
+type httpPaginationSettings struct {
+	enabled            bool
+	parameters         any
+	completeExpression string
+	maxRequests        int
+}
+
+func httpPaginationConfig(params map[string]any) httpPaginationSettings {
+	group := httpOptionGroup(params, "pagination")
+	if len(group) == 0 {
+		return httpPaginationSettings{}
+	}
+	maxRequests := 100
+	if boolParam(group, "limitPagesFetched", false) {
+		maxRequests = intParam(group, "maxRequests", maxRequests)
+	}
+	if maxRequests <= 0 {
+		maxRequests = 100
+	}
+	return httpPaginationSettings{
+		enabled:            true,
+		parameters:         group["parameters"],
+		completeExpression: strings.TrimSpace(stringParam(group, "completeExpression")),
+		maxRequests:        maxRequests,
+	}
+}
+
+func httpPaginationQuery(in engine.ExecuteInput, items []dataplane.Item, index int, pageCount int, responseBody any, responseItem dataplane.Item, raw any) map[string]any {
+	if raw == nil {
+		return nil
+	}
+	paginationInput := in
+	paginationInput.Expr = firstNonNilResolver(in.Expr)
+	result := map[string]any{}
+	if entries := httpCollectionEntriesWithExtra(paginationInput, items, index, raw, httpPaginationExpressionExtra(pageCount, responseBody, responseItem)); len(entries) > 0 {
+		for _, entry := range entries {
+			name := firstNonEmptyNode(stringParam(entry, "name"), stringParam(entry, "key"))
+			if name == "" {
+				continue
+			}
+			result[name] = resolveHTTPValue(paginationInput, items, index, firstPresent(entry, "value", "headerValue"), httpPaginationExpressionExtra(pageCount, responseBody, responseItem))
+		}
+	}
+	return result
+}
+
+func httpPaginationComplete(in engine.ExecuteInput, items []dataplane.Item, index int, pageCount int, responseBody any, responseItem dataplane.Item, rawExpression string) bool {
+	if rawExpression == "" {
+		return false
+	}
+	value := resolveHTTPValue(in, items, index, rawExpression, httpPaginationExpressionExtra(pageCount, responseBody, responseItem))
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+
+func httpPaginationBody(body []byte, item dataplane.Item) any {
+	var decoded any
+	if len(body) > 0 && json.Unmarshal(body, &decoded) == nil {
+		return decoded
+	}
+	if bodyValue, ok := item.JSON["body"]; ok {
+		return bodyValue
+	}
+	return item.JSON
+}
+
+func httpPaginationExpressionExtra(pageCount int, responseBody any, responseItem dataplane.Item) map[string]any {
+	return map[string]any{
+		"$pageCount": pageCount,
+		"$response": map[string]any{
+			"body": responseBody,
+			"item": responseItem.JSON,
+		},
+	}
+}
+
+func httpCollectionEntriesWithExtra(in engine.ExecuteInput, items []dataplane.Item, index int, raw any, extra map[string]any) []map[string]any {
+	value := resolveHTTPValue(in, items, index, raw, extra)
+	object, ok := rawObject(value)
+	if !ok {
+		return nil
+	}
+	for _, key := range []string{"parameters", "values", "entries"} {
+		entries, ok := object[key].([]any)
+		if !ok {
+			continue
+		}
+		result := make([]map[string]any, 0, len(entries))
+		for _, entry := range entries {
+			if entryObject, ok := rawObject(entry); ok {
+				result = append(result, entryObject)
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+func resolveHTTPValue(in engine.ExecuteInput, items []dataplane.Item, itemIndex int, value any, extra map[string]any) any {
+	if in.Expr == nil {
+		in.Expr = firstNonNilResolver(nil)
+	}
+	resolved, err := in.Expr.Resolve(value, expr.Context{
+		Items:         items,
+		CurrentIndex:  itemIndex,
+		RunData:       in.RunData,
+		Variables:     in.Variables,
+		Secrets:       in.Secrets,
+		WorkflowID:    in.WorkflowID,
+		WorkflowName:  in.WorkflowName,
+		ExecutionID:   in.ExecutionID,
+		ExecutionMode: in.ExecutionMode,
+		ResumeURL:     in.ResumeURL,
+		ResumeFormURL: in.ResumeFormURL,
+		ScheduledTime: in.ScheduledTime,
+		RunIndex:      in.RunIndex,
+		Extra:         extra,
+	})
+	if err != nil {
+		return value
+	}
+	return resolved
+}
+
+func firstNonNilResolver(resolver *expr.Resolver) *expr.Resolver {
+	if resolver != nil {
+		return resolver
+	}
+	return expr.NewResolver(5 * time.Second)
 }
 
 func httpRequestQuery(in engine.ExecuteInput, items []dataplane.Item, index int, params map[string]any) map[string]any {
 	result := httpMap(in, items, index, params["query"])
-	if boolParam(params, "sendQuery", len(result) > 0 || params["queryParameters"] != nil || params["jsonQuery"] != nil) {
+	if boolParam(params, "sendQuery", len(result) > 0 || params["queryParameters"] != nil || params["queryParametersUi"] != nil || params["jsonQuery"] != nil || params["queryParametersJson"] != nil) {
 		if strings.EqualFold(stringParam(params, "specifyQuery"), "json") {
-			for key, value := range httpMap(in, items, index, params["jsonQuery"]) {
+			for key, value := range httpMap(in, items, index, httpFirstPresent(params, "jsonQuery", "queryParametersJson")) {
 				result[key] = value
 			}
-		}
-		for key, value := range httpNameValueMap(in, items, index, params["queryParameters"]) {
-			result[key] = value
+		} else {
+			for key, value := range httpNameValueMap(in, items, index, httpFirstPresent(params, "queryParameters", "queryParametersUi")) {
+				result[key] = value
+			}
+			for key, value := range httpMap(in, items, index, params["queryParametersJson"]) {
+				result[key] = value
+			}
 		}
 	}
 	return result
@@ -523,14 +736,18 @@ func httpRequestQuery(in engine.ExecuteInput, items []dataplane.Item, index int,
 
 func httpRequestHeaders(in engine.ExecuteInput, items []dataplane.Item, index int, params map[string]any) map[string]any {
 	result := httpMap(in, items, index, params["headers"])
-	if boolParam(params, "sendHeaders", len(result) > 0 || params["headerParameters"] != nil || params["jsonHeaders"] != nil) {
+	if boolParam(params, "sendHeaders", len(result) > 0 || params["headerParameters"] != nil || params["headerParametersUi"] != nil || params["jsonHeaders"] != nil || params["headerParametersJson"] != nil) {
 		if strings.EqualFold(stringParam(params, "specifyHeaders"), "json") {
-			for key, value := range httpMap(in, items, index, params["jsonHeaders"]) {
+			for key, value := range httpMap(in, items, index, httpFirstPresent(params, "jsonHeaders", "headerParametersJson")) {
 				result[key] = value
 			}
-		}
-		for key, value := range httpNameValueMap(in, items, index, params["headerParameters"]) {
-			result[key] = value
+		} else {
+			for key, value := range httpNameValueMap(in, items, index, httpFirstPresent(params, "headerParameters", "headerParametersUi")) {
+				result[key] = value
+			}
+			for key, value := range httpMap(in, items, index, params["headerParametersJson"]) {
+				result[key] = value
+			}
 		}
 	}
 	if boolParam(httpOptionsMap(params), "lowercaseHeaders", true) {
@@ -634,6 +851,15 @@ func httpMapParameter(params map[string]any, key string) map[string]any {
 	}
 	if object, ok := rawObject(value); ok {
 		return object
+	}
+	return nil
+}
+
+func httpFirstPresent(params map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := params[key]; ok {
+			return value
+		}
 	}
 	return nil
 }

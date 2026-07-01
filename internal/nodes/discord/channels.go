@@ -31,6 +31,7 @@ func (n *Node) handleChannel(ctx context.Context, cred Credential, operation str
 		for key, value := range mapParam(params, "additionalFields") {
 			body[key] = value
 		}
+		applyChannelOptions(body, mapParam(params, "options"))
 		return single(n.doJSON(ctx, cred, http.MethodPost, "/guilds/"+guildID+"/channels", body))
 	case "update":
 		channelID := stringParam(params, "channelId", "channel_id")
@@ -44,8 +45,9 @@ func (n *Node) handleChannel(ctx context.Context, cred Credential, operation str
 		for key, value := range mapParam(params, "additionalFields") {
 			body[key] = value
 		}
+		applyChannelOptions(body, mapParam(params, "options"))
 		return single(n.doJSON(ctx, cred, http.MethodPatch, "/channels/"+channelID, body))
-	case "delete":
+	case "delete", "deleteChannel":
 		channelID := stringParam(params, "channelId", "channel_id")
 		if channelID == "" {
 			return nil, fmt.Errorf("channelId is required")
@@ -53,5 +55,20 @@ func (n *Node) handleChannel(ctx context.Context, cred Credential, operation str
 		return single(n.doJSON(ctx, cred, http.MethodDelete, "/channels/"+channelID, nil))
 	default:
 		return nil, fmt.Errorf("unknown channel operation %s", operation)
+	}
+}
+
+func applyChannelOptions(body map[string]any, options map[string]any) {
+	if len(options) == 0 {
+		return
+	}
+	for key, value := range options {
+		if key == "categoryId" {
+			if parentID := textValue(value); parentID != "" {
+				body["parent_id"] = parentID
+			}
+			continue
+		}
+		body[key] = value
 	}
 }

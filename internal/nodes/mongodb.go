@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -63,14 +64,20 @@ func (MongoDB) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.O
 		return mongoFind(ctx, coll, in)
 	case "findone":
 		return mongoFindOne(ctx, coll, in)
+	case "insert":
+		return mongoInsertOfficial(ctx, coll, in)
 	case "insertone":
 		return mongoInsertOne(ctx, coll, in)
 	case "insertmany":
 		return mongoInsertMany(ctx, coll, in)
+	case "update":
+		return mongoUpdateOfficial(ctx, coll, in, false)
 	case "updateone":
 		return mongoUpdate(ctx, coll, in, false)
 	case "updatemany":
 		return mongoUpdate(ctx, coll, in, true)
+	case "delete":
+		return mongoDeleteOfficial(ctx, coll, in)
 	case "deleteone":
 		return mongoDelete(ctx, coll, in, false)
 	case "deletemany":
@@ -80,9 +87,22 @@ func (MongoDB) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.O
 	case "countdocuments", "count":
 		return mongoCount(ctx, coll, in)
 	case "findoneandupdate":
+		if _, ok := in.Node.Parameters["fields"]; ok {
+			return mongoUpdateOfficial(ctx, coll, in, true)
+		}
 		return mongoFindOneAndUpdate(ctx, coll, in)
+	case "findoneandreplace":
+		return mongoReplaceOfficial(ctx, coll, in)
 	case "findoneanddelete":
 		return mongoFindOneAndDelete(ctx, coll, in)
+	case "listsearchindexes":
+		return mongoListSearchIndexes(ctx, coll, in)
+	case "createsearchindex":
+		return mongoCreateSearchIndex(ctx, coll, in)
+	case "dropsearchindex":
+		return mongoDropSearchIndex(ctx, coll, in)
+	case "updatesearchindex":
+		return mongoUpdateSearchIndex(ctx, coll, in)
 	default:
 		return nil, fmt.Errorf("unsupported mongodb operation %q", stringParam(in.Node.Parameters, "operation"))
 	}
@@ -194,29 +214,40 @@ func mongoURIWithAuthSource(raw string, authSource string) string {
 
 func mongoFind(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
 	items := firstInput(in.InputData)
-	findOptions := options.Find()
-	if limit := intParam(in.Node.Parameters, "limit", 0); limit > 0 {
-		findOptions.SetLimit(int64(limit))
+	if len(items) == 0 {
+		items = []dataplane.Item{{JSON: map[string]any{}}}
 	}
-	if skip := intParam(in.Node.Parameters, "skip", intParam(in.Node.Parameters, "offset", 0)); skip > 0 {
-		findOptions.SetSkip(int64(skip))
+	nodeOptions := mongoOptions(in.Node.Parameters)
+	output := make([]dataplane.Item, 0)
+	for index := range items {
+		findOptions := options.Find()
+		if limit := intParamMongo(firstNonNil(in.Node.Parameters["limit"], nodeOptions["limit"]), 0); limit > 0 {
+			findOptions.SetLimit(int64(limit))
+		}
+		if skip := intParamMongo(firstNonNil(in.Node.Parameters["skip"], nodeOptions["skip"], in.Node.Parameters["offset"]), 0); skip > 0 {
+			findOptions.SetSkip(int64(skip))
+		}
+		if projection := mongoResolvedDocument(in, items, index, firstNonNil(in.Node.Parameters["projection"], nodeOptions["projection"])); len(projection) > 0 {
+			findOptions.SetProjection(projection)
+		}
+		if sort := mongoResolvedDocument(in, items, index, firstNonNil(in.Node.Parameters["sort"], nodeOptions["sort"])); len(sort) > 0 {
+			findOptions.SetSort(sort)
+		}
+		cursor, err := coll.Find(ctx, mongoResolvedDocument(in, items, index, firstPresent(in.Node.Parameters, "query", "filter")), findOptions)
+		if err != nil {
+			return nil, wrapMongoError("find", err)
+		}
+		itemsOut, err := mongoCursorItems(ctx, cursor)
+		_ = cursor.Close(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for itemIndex := range itemsOut {
+			itemsOut[itemIndex].PairedItem = &dataplane.PairedItem{Item: index}
+		}
+		output = append(output, itemsOut...)
 	}
-	if projection := mongoResolvedDocument(in, items, 0, in.Node.Parameters["projection"]); len(projection) > 0 {
-		findOptions.SetProjection(projection)
-	}
-	if sort := mongoResolvedDocument(in, items, 0, in.Node.Parameters["sort"]); len(sort) > 0 {
-		findOptions.SetSort(sort)
-	}
-	cursor, err := coll.Find(ctx, mongoResolvedDocument(in, items, 0, firstPresent(in.Node.Parameters, "query", "filter")), findOptions)
-	if err != nil {
-		return nil, wrapMongoError("find", err)
-	}
-	defer cursor.Close(ctx)
-	itemsOut, err := mongoCursorItems(ctx, cursor)
-	if err != nil {
-		return nil, err
-	}
-	return dataplane.MainOutput(itemsOut), nil
+	return dataplane.MainOutput(output), nil
 }
 
 func mongoFindOne(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
@@ -284,6 +315,31 @@ func mongoInsertMany(ctx context.Context, coll *mongo.Collection, in engine.Exec
 	return dataplane.MainOutput(output), nil
 }
 
+func mongoInsertOfficial(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
+	items := firstInput(in.InputData)
+	documents := mongoPreparedItems(in, items, false)
+	if len(documents) == 0 {
+		return dataplane.MainOutput([]dataplane.Item{}), nil
+	}
+	rawDocuments := make([]any, 0, len(documents))
+	for _, document := range documents {
+		rawDocuments = append(rawDocuments, mongoDocument(document))
+	}
+	result, err := coll.InsertMany(ctx, rawDocuments)
+	if err != nil {
+		return nil, wrapMongoError("insert", err)
+	}
+	output := make([]dataplane.Item, 0, len(documents))
+	for index, document := range documents {
+		row := mongoJSON(mongoDocument(document))
+		if index < len(result.InsertedIDs) {
+			row["id"] = mongoJSONValue(result.InsertedIDs[index])
+		}
+		output = append(output, dataplane.Item{JSON: row, PairedItem: &dataplane.PairedItem{Item: index}})
+	}
+	return dataplane.MainOutput(output), nil
+}
+
 func mongoUpdate(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput, many bool) (dataplane.Output, error) {
 	items := firstInput(in.InputData)
 	filter := mongoResolvedDocument(in, items, 0, firstPresent(in.Node.Parameters, "filter", "query"))
@@ -303,6 +359,59 @@ func mongoUpdate(ctx context.Context, coll *mongo.Collection, in engine.ExecuteI
 	return dataplane.MainOutput([]dataplane.Item{mongoUpdateResult(result.MatchedCount, result.ModifiedCount, result.UpsertedCount, result.UpsertedID)}), nil
 }
 
+func mongoUpdateOfficial(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput, findOne bool) (dataplane.Output, error) {
+	items := firstInput(in.InputData)
+	updateKey := strings.TrimSpace(stringParam(in.Node.Parameters, "updateKey"))
+	documents := mongoPreparedItems(in, items, true)
+	upsert := boolParam(in.Node.Parameters, "upsert", false)
+	output := make([]dataplane.Item, 0, len(documents))
+	for index, document := range documents {
+		filter := mongoUpdateFilter(updateKey, document)
+		updateDocument := mongoDocument(document)
+		if updateKey == "_id" {
+			delete(updateDocument, "_id")
+		}
+		var err error
+		if findOne {
+			err = coll.FindOneAndUpdate(ctx, filter, bson.M{"$set": updateDocument}, options.FindOneAndUpdate().SetUpsert(upsert)).Err()
+			if err == mongo.ErrNoDocuments {
+				err = nil
+			}
+		} else {
+			_, err = coll.UpdateOne(ctx, filter, bson.M{"$set": updateDocument}, options.UpdateOne().SetUpsert(upsert))
+		}
+		if err != nil {
+			return nil, wrapMongoError("update", err)
+		}
+		output = append(output, dataplane.Item{JSON: mongoJSON(mongoDocument(document)), PairedItem: &dataplane.PairedItem{Item: index}})
+	}
+	return dataplane.MainOutput(output), nil
+}
+
+func mongoReplaceOfficial(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
+	items := firstInput(in.InputData)
+	updateKey := strings.TrimSpace(stringParam(in.Node.Parameters, "updateKey"))
+	documents := mongoPreparedItems(in, items, false)
+	upsert := boolParam(in.Node.Parameters, "upsert", false)
+	output := make([]dataplane.Item, 0, len(documents))
+	for index, document := range documents {
+		filter := mongoUpdateFilter(updateKey, document)
+		replaceDocument := mongoDocument(document)
+		if updateKey == "_id" {
+			delete(replaceDocument, "_id")
+		}
+		err := coll.FindOneAndReplace(ctx, filter, replaceDocument, options.FindOneAndReplace().SetUpsert(upsert)).Err()
+		if err == mongo.ErrNoDocuments {
+			err = nil
+		}
+		if err != nil {
+			return nil, wrapMongoError("findOneAndReplace", err)
+		}
+		output = append(output, dataplane.Item{JSON: mongoJSON(mongoDocument(document)), PairedItem: &dataplane.PairedItem{Item: index}})
+	}
+	return dataplane.MainOutput(output), nil
+}
+
 func mongoDelete(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput, many bool) (dataplane.Output, error) {
 	items := firstInput(in.InputData)
 	filter := mongoResolvedDocument(in, items, 0, firstPresent(in.Node.Parameters, "filter", "query"))
@@ -320,22 +429,99 @@ func mongoDelete(ctx context.Context, coll *mongo.Collection, in engine.ExecuteI
 	return dataplane.MainOutput([]dataplane.Item{{JSON: map[string]any{"deletedCount": result.DeletedCount}}}), nil
 }
 
-func mongoAggregate(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
+func mongoDeleteOfficial(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
 	items := firstInput(in.InputData)
-	aggregateOptions := options.Aggregate()
-	if boolParam(mongoOptions(in.Node.Parameters), "allowDiskUse", false) {
-		aggregateOptions.SetAllowDiskUse(true)
+	if len(items) == 0 {
+		items = []dataplane.Item{{JSON: map[string]any{}}}
 	}
-	cursor, err := coll.Aggregate(ctx, mongoResolvedPipeline(in, items, 0, in.Node.Parameters["pipeline"]), aggregateOptions)
+	output := make([]dataplane.Item, 0, len(items))
+	for index := range items {
+		result, err := coll.DeleteMany(ctx, mongoResolvedDocument(in, items, index, in.Node.Parameters["query"]))
+		if err != nil {
+			return nil, wrapMongoError("delete", err)
+		}
+		output = append(output, dataplane.Item{JSON: map[string]any{"deletedCount": result.DeletedCount}, PairedItem: &dataplane.PairedItem{Item: index}})
+	}
+	return dataplane.MainOutput(output), nil
+}
+
+func mongoListSearchIndexes(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
+	indexOptions := options.SearchIndexes()
+	if name := stringParam(in.Node.Parameters, "indexName"); name != "" {
+		indexOptions.SetName(name)
+	}
+	cursor, err := coll.SearchIndexes().List(ctx, indexOptions)
 	if err != nil {
-		return nil, wrapMongoError("aggregate", err)
+		return nil, wrapMongoError("listSearchIndexes", err)
 	}
 	defer cursor.Close(ctx)
 	itemsOut, err := mongoCursorItems(ctx, cursor)
 	if err != nil {
 		return nil, err
 	}
+	for index := range itemsOut {
+		itemsOut[index].PairedItem = &dataplane.PairedItem{Item: 0}
+	}
 	return dataplane.MainOutput(itemsOut), nil
+}
+
+func mongoCreateSearchIndex(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
+	indexName := stringParam(in.Node.Parameters, "indexNameRequired")
+	indexType := firstNonEmptyNode(stringParam(in.Node.Parameters, "indexType"), "vectorSearch")
+	definition := mongoResolvedDocument(in, firstInput(in.InputData), 0, in.Node.Parameters["indexDefinition"])
+	_, err := coll.SearchIndexes().CreateOne(ctx, mongo.SearchIndexModel{
+		Definition: definition,
+		Options:    options.SearchIndexes().SetName(indexName).SetType(indexType),
+	})
+	if err != nil {
+		return nil, wrapMongoError("createSearchIndex", err)
+	}
+	return dataplane.MainOutput([]dataplane.Item{{JSON: map[string]any{"indexName": indexName}, PairedItem: &dataplane.PairedItem{Item: 0}}}), nil
+}
+
+func mongoDropSearchIndex(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
+	indexName := stringParam(in.Node.Parameters, "indexNameRequired")
+	if err := coll.SearchIndexes().DropOne(ctx, indexName); err != nil {
+		return nil, wrapMongoError("dropSearchIndex", err)
+	}
+	return dataplane.MainOutput([]dataplane.Item{{JSON: map[string]any{indexName: true}, PairedItem: &dataplane.PairedItem{Item: 0}}}), nil
+}
+
+func mongoUpdateSearchIndex(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
+	indexName := stringParam(in.Node.Parameters, "indexNameRequired")
+	definition := mongoResolvedDocument(in, firstInput(in.InputData), 0, in.Node.Parameters["indexDefinition"])
+	if err := coll.SearchIndexes().UpdateOne(ctx, indexName, definition); err != nil {
+		return nil, wrapMongoError("updateSearchIndex", err)
+	}
+	return dataplane.MainOutput([]dataplane.Item{{JSON: map[string]any{indexName: true}, PairedItem: &dataplane.PairedItem{Item: 0}}}), nil
+}
+
+func mongoAggregate(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
+	items := firstInput(in.InputData)
+	if len(items) == 0 {
+		items = []dataplane.Item{{JSON: map[string]any{}}}
+	}
+	output := make([]dataplane.Item, 0)
+	for index := range items {
+		aggregateOptions := options.Aggregate()
+		if boolParam(mongoOptions(in.Node.Parameters), "allowDiskUse", false) {
+			aggregateOptions.SetAllowDiskUse(true)
+		}
+		cursor, err := coll.Aggregate(ctx, mongoResolvedPipeline(in, items, index, firstNonNil(in.Node.Parameters["pipeline"], in.Node.Parameters["query"])), aggregateOptions)
+		if err != nil {
+			return nil, wrapMongoError("aggregate", err)
+		}
+		itemsOut, err := mongoCursorItems(ctx, cursor)
+		_ = cursor.Close(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for itemIndex := range itemsOut {
+			itemsOut[itemIndex].PairedItem = &dataplane.PairedItem{Item: index}
+		}
+		output = append(output, itemsOut...)
+	}
+	return dataplane.MainOutput(output), nil
 }
 
 func mongoCount(ctx context.Context, coll *mongo.Collection, in engine.ExecuteInput) (dataplane.Output, error) {
@@ -455,6 +641,103 @@ func mongoInputDocuments(in engine.ExecuteInput, items []dataplane.Item) []bson.
 		documents = append(documents, mongoInputDocument(in, items, index))
 	}
 	return documents
+}
+
+func mongoPreparedItems(in engine.ExecuteInput, items []dataplane.Item, isUpdate bool) []map[string]any {
+	fields := mongoPrepareFields(stringParam(in.Node.Parameters, "fields"))
+	updateKey := strings.TrimSpace(stringParam(in.Node.Parameters, "updateKey"))
+	if updateKey != "" && !stringSliceContains(fields, updateKey) {
+		fields = append(fields, updateKey)
+	}
+	options := mongoOptions(in.Node.Parameters)
+	useDotNotation := boolParam(options, "useDotNotation", false)
+	dateFields := mongoPrepareFields(stringParam(options, "dateFields"))
+	prepared := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if updateKey != "" {
+			if _, ok := item.JSON[updateKey]; !ok {
+				continue
+			}
+		}
+		document := map[string]any{}
+		for _, field := range fields {
+			value := mongoPreparedFieldValue(item.JSON, field, useDotNotation)
+			if value != nil && stringSliceContains(dateFields, field) {
+				value = mongoDateValue(value)
+			}
+			if useDotNotation && !isUpdate {
+				redisSetOutputValue(document, field, value, true)
+			} else {
+				document[field] = value
+			}
+		}
+		prepared = append(prepared, document)
+	}
+	return prepared
+}
+
+func mongoPrepareFields(fields string) []string {
+	parts := strings.Split(fields, ",")
+	result := make([]string, 0, len(parts))
+	for _, field := range parts {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			result = append(result, field)
+		}
+	}
+	return result
+}
+
+func mongoPreparedFieldValue(source map[string]any, field string, useDotNotation bool) any {
+	if !useDotNotation {
+		if value, ok := source[field]; ok {
+			return value
+		}
+		return nil
+	}
+	current := any(source)
+	for _, part := range strings.Split(field, ".") {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current = object[part]
+	}
+	if current == nil {
+		return nil
+	}
+	return current
+}
+
+func mongoDateValue(value any) any {
+	if typed, ok := value.(time.Time); ok {
+		return typed
+	}
+	if parsed, err := time.Parse(time.RFC3339, fmt.Sprint(value)); err == nil {
+		return parsed
+	}
+	return value
+}
+
+func mongoUpdateFilter(updateKey string, document map[string]any) bson.M {
+	value := document[updateKey]
+	if updateKey == "_id" {
+		if text, ok := value.(string); ok && len(text) == 24 && mongoIsHex(text) {
+			if id, err := bson.ObjectIDFromHex(text); err == nil {
+				value = id
+			}
+		}
+	}
+	return bson.M{updateKey: value}
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func mongoResolvedDocument(in engine.ExecuteInput, items []dataplane.Item, index int, value any) bson.M {
@@ -642,6 +925,22 @@ func mongoOptions(params map[string]any) map[string]any {
 		return additional
 	}
 	return map[string]any{}
+}
+
+func intParamMongo(value any, fallback int) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case string:
+		if parsed, err := strconv.Atoi(typed); err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 func mongoIsHex(value string) bool {

@@ -25,6 +25,7 @@ func (n *Node) sendEmail(ctx context.Context, cred Credential, params map[string
 	if err != nil {
 		return nil, err
 	}
+	additionalFields := nestedMap(params, "additionalFields")
 	fromEmail := stringParam(params, "fromEmail", "from")
 	if fromEmail == "" {
 		return nil, fmt.Errorf("fromEmail is required")
@@ -33,43 +34,46 @@ func (n *Node) sendEmail(ctx context.Context, cred Credential, params map[string
 		Personalizations: []Personalization{{To: to}},
 		From:             EmailAddress{Email: fromEmail, Name: stringParam(params, "fromName")},
 		Subject:          stringParam(params, "subject"),
+		MailSettings:     map[string]any{"sandbox_mode": map[string]any{"enable": boolParam(additionalFields, "enableSandbox")}},
 	}
-	if cc := stringParam(params, "ccEmail", "cc"); cc != "" {
+	if cc := firstText(stringParam(params, "ccEmail", "cc"), stringParam(additionalFields, "ccEmail")); cc != "" {
 		req.Personalizations[0].CC, err = ParseEmailList(cc)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if bcc := stringParam(params, "bccEmail", "bcc"); bcc != "" {
+	if bcc := firstText(stringParam(params, "bccEmail", "bcc"), stringParam(additionalFields, "bccEmail")); bcc != "" {
 		req.Personalizations[0].BCC, err = ParseEmailList(bcc)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if replyTo := stringParam(params, "replyTo", "replyToEmail"); replyTo != "" {
+	if replyTo := firstText(stringParam(params, "replyTo", "replyToEmail"), stringParam(additionalFields, "replyToEmail")); replyTo != "" {
 		parsed, err := ParseEmailList(replyTo)
 		if err != nil {
 			return nil, err
 		}
 		req.ReplyTo = &parsed[0]
+		req.ReplyToList = parsed
 	}
 	req.TemplateID = stringParam(params, "templateId", "templateID")
-	if req.TemplateID != "" {
-		data, err := mapParam(params, "dynamicTemplateData")
+	if boolParam(params, "dynamicTemplate") && req.TemplateID != "" {
+		data, err := dynamicTemplateData(params)
 		if err != nil {
 			return nil, err
 		}
 		req.Personalizations[0].DynamicTemplateData = data
 	} else {
+		req.Personalizations[0].Subject = req.Subject
 		req.Content = buildContent(params)
 		if len(req.Content) == 0 {
 			return nil, fmt.Errorf("textContent or htmlContent is required")
 		}
 	}
-	if categories := stringSlice(params, "categories"); len(categories) > 0 {
+	if categories := firstStringSlice(stringSlice(params, "categories"), stringSlice(additionalFields, "categories")); len(categories) > 0 {
 		req.Categories = categories
 	}
-	if sendAt := stringParam(params, "sendAt"); sendAt != "" {
+	if sendAt := firstText(stringParam(params, "sendAt"), stringParam(additionalFields, "sendAt")); sendAt != "" {
 		parsed, err := time.Parse(time.RFC3339, sendAt)
 		if err != nil {
 			return nil, err
@@ -77,6 +81,12 @@ func (n *Node) sendEmail(ctx context.Context, cred Credential, params map[string
 		req.SendAt = parsed.Unix()
 		req.Personalizations[0].SendAt = req.SendAt
 	}
+	if headers, err := headerMap(additionalFields["headers"]); err != nil {
+		return nil, err
+	} else if len(headers) > 0 {
+		req.Headers = headers
+	}
+	req.IPPoolName = stringParam(additionalFields, "ipPoolName")
 	if boolParam(params, "disableTracking") {
 		req.TrackingSettings = map[string]any{
 			"click_tracking": map[string]any{"enable": false, "enable_text": false},
@@ -95,6 +105,9 @@ func buildContent(params map[string]any) []Content {
 	mode := strings.ToLower(stringParam(params, "contentMode"))
 	text := stringParam(params, "textContent", "text", "body")
 	html := stringParam(params, "htmlContent", "html")
+	if contentValue := stringParam(params, "contentValue"); contentValue != "" {
+		return []Content{{Type: firstText(stringParam(params, "contentType"), "text/plain"), Value: contentValue}}
+	}
 	content := []Content{}
 	if (mode == "" || mode == "text" || mode == "both") && text != "" {
 		content = append(content, Content{Type: "text/plain", Value: text})
@@ -103,6 +116,69 @@ func buildContent(params map[string]any) []Content {
 		content = append(content, Content{Type: "text/html", Value: html})
 	}
 	return content
+}
+
+func dynamicTemplateData(params map[string]any) (map[string]any, error) {
+	if data, err := mapParam(params, "dynamicTemplateData"); err != nil || len(data) > 0 {
+		return data, err
+	}
+	fields := nestedMap(params, "dynamicTemplateFields")["fields"]
+	switch values := fields.(type) {
+	case []any:
+		out := map[string]any{}
+		for _, value := range values {
+			if object, ok := value.(map[string]any); ok {
+				key := stringValue(object, "key")
+				if key != "" {
+					out[key] = object["value"]
+				}
+			}
+		}
+		return out, nil
+	default:
+		return map[string]any{}, nil
+	}
+}
+
+func headerMap(raw any) (map[string]string, error) {
+	object, ok := raw.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	details, ok := object["details"].([]any)
+	if !ok {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for _, value := range details {
+		detail, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		key := stringValue(detail, "key")
+		if key != "" {
+			out[key] = stringValue(detail, "value")
+		}
+	}
+	return out, nil
+}
+
+func firstText(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstStringSlice(values ...[]string) []string {
+	for _, value := range values {
+		if len(value) > 0 {
+			return value
+		}
+	}
+	return nil
 }
 
 func mapParam(params map[string]any, key string) (map[string]any, error) {

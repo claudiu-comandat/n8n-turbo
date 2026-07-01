@@ -26,7 +26,7 @@ func DefaultCSP(baseURL string) CSPConfig {
 		ConnectSrc: connect,
 		FontSrc:    []string{"'self'", "data:"},
 		ImgSrc:     []string{"'self'", "data:", "blob:", "https:"},
-		ScriptSrc:  []string{"'self'", "'unsafe-eval'", "'wasm-unsafe-eval'"},
+		ScriptSrc:  []string{"'self'", "'unsafe-inline'", "'unsafe-eval'", "'wasm-unsafe-eval'", "data:"},
 		StyleSrc:   []string{"'self'", "'unsafe-inline'"},
 	}
 }

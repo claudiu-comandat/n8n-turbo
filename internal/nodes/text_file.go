@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/n8n-io/n8n-turbo/internal/binarydata"
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
@@ -38,16 +39,30 @@ type Markdown struct{}
 type ConvertToFile struct{}
 
 func (Compression) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
-	operation := firstNonEmptyNode(stringParam(in.Node.Parameters, "operation"), "compress")
+	operation := firstNonEmptyNode(stringParam(in.Node.Parameters, "operation"), "decompress")
 	inputFields := compressionInputFields(in.Node.Parameters, operation)
 	field := inputFields[0]
 	if field == "" {
 		field = "data"
 	}
+	outputFormat := firstNonEmptyNode(stringParam(in.Node.Parameters, "outputFormat"), "zip")
+	outputField := firstNonEmptyNode(stringParam(in.Node.Parameters, "binaryPropertyOutput"), field)
+	outputFileName := stringParam(in.Node.Parameters, "fileName")
 	outputPrefix := firstNonEmptyNode(stringParam(in.Node.Parameters, "outputPrefix"), "file_")
-	result := make([]dataplane.Item, 0, len(firstInput(in.InputData)))
-	for _, item := range firstInput(in.InputData) {
-		next := cloneItem(item)
+	inputItems := firstInput(in.InputData)
+	result := make([]dataplane.Item, 0, len(inputItems))
+	for itemIndex, item := range inputItems {
+		next := itemWithPairedIndex(cloneItem(item), itemIndex, true)
+		if operation == "compress" && len(item.Binary) > 0 {
+			outputs, metadata, err := compressOfficialBinaryFields(ctx, in, item, inputFields, outputFormat, outputField, outputFileName)
+			if err != nil {
+				return nil, err
+			}
+			_ = metadata
+			next = dataplane.Item{JSON: deepCopySetMap(item.JSON), Binary: outputs, PairedItem: &dataplane.PairedItem{Item: itemIndex}, Error: item.Error}
+			result = append(result, next)
+			continue
+		}
 		if operation == "decompress" {
 			if binary, ok := firstAvailableBinary(item.Binary, inputFields); ok {
 				if in.BinaryStore != nil {
@@ -55,13 +70,7 @@ func (Compression) Execute(ctx context.Context, in engine.ExecuteInput) (datapla
 					if err != nil {
 						return nil, err
 					}
-					if next.Binary == nil {
-						next.Binary = map[string]dataplane.Binary{}
-					}
-					for name, output := range outputs {
-						next.Binary[name] = output
-					}
-					next.JSON["fileCount"] = len(outputs)
+					next = dataplane.Item{JSON: deepCopySetMap(item.JSON), Binary: outputs, PairedItem: &dataplane.PairedItem{Item: itemIndex}, Error: item.Error}
 					result = append(result, next)
 					continue
 				}
@@ -168,13 +177,16 @@ func (Compression) Execute(ctx context.Context, in engine.ExecuteInput) (datapla
 				outBinary = binarydata.BinaryFromRef(ref)
 				outBinary.FileExtension = strings.TrimPrefix(filepath.Ext(fileName), ".")
 			}
-			if next.Binary == nil {
-				next.Binary = map[string]dataplane.Binary{}
+			outField := field
+			if operation == "decompress" {
+				outField = outputPrefix + "0"
 			}
-			next.Binary[field] = outBinary
-			next.JSON["fileName"] = fileName
-			next.JSON["mimeType"] = mimeType
-			next.JSON["fileSize"] = int64(len(transformed))
+			next = dataplane.Item{
+				JSON:       deepCopySetMap(item.JSON),
+				Binary:     map[string]dataplane.Binary{outField: outBinary},
+				PairedItem: &dataplane.PairedItem{Item: itemIndex},
+				Error:      item.Error,
+			}
 			result = append(result, next)
 			continue
 		}
@@ -218,11 +230,7 @@ func compressionInputFields(parameters map[string]any, operation string) []strin
 		stringParam(parameters, "fieldName"),
 	)
 	if raw == "" {
-		if operation == "decompress" {
-			raw = "zipFile"
-		} else {
-			raw = "data"
-		}
+		raw = "data"
 	}
 	parts := strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
@@ -238,6 +246,117 @@ func compressionInputFields(parameters map[string]any, operation string) []strin
 		result = append(result, raw)
 	}
 	return result
+}
+
+func compressOfficialBinaryFields(ctx context.Context, in engine.ExecuteInput, item dataplane.Item, inputFields []string, outputFormat string, outputField string, outputFileName string) (map[string]dataplane.Binary, map[string]any, error) {
+	outputFormat = strings.ToLower(firstNonEmptyNode(outputFormat, "zip"))
+	if outputField == "" {
+		outputField = "data"
+	}
+	switch outputFormat {
+	case "gzip", "gz":
+		return gzipOfficialBinaryFields(ctx, in, item, inputFields, outputField, outputFileName)
+	default:
+		return zipOfficialBinaryFields(ctx, in, item, inputFields, outputField, outputFileName)
+	}
+}
+
+func zipOfficialBinaryFields(ctx context.Context, in engine.ExecuteInput, item dataplane.Item, inputFields []string, outputField string, outputFileName string) (map[string]dataplane.Binary, map[string]any, error) {
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	count := 0
+	for _, field := range inputFields {
+		binary, ok := item.Binary[field]
+		if !ok {
+			continue
+		}
+		payload, err := binarydata.Read(ctx, in.BinaryStore, binary)
+		if err != nil {
+			_ = writer.Close()
+			return nil, nil, err
+		}
+		entryName := firstNonEmptyNode(binary.FileName, field)
+		entry, err := writer.Create(entryName)
+		if err != nil {
+			_ = writer.Close()
+			return nil, nil, err
+		}
+		if _, err := entry.Write(payload); err != nil {
+			_ = writer.Close()
+			return nil, nil, err
+		}
+		count++
+	}
+	if count == 0 {
+		_ = writer.Close()
+		return nil, nil, fmt.Errorf("compression: none of the input binary fields were found")
+	}
+	if err := writer.Close(); err != nil {
+		return nil, nil, err
+	}
+	fileName := firstNonEmptyNode(outputFileName, "data.zip")
+	if !strings.HasSuffix(strings.ToLower(fileName), ".zip") {
+		fileName += ".zip"
+	}
+	binary, err := convertOutputBinary(ctx, in, buffer.Bytes(), "application/zip", fileName)
+	if err != nil {
+		return nil, nil, err
+	}
+	return map[string]dataplane.Binary{outputField: binary}, map[string]any{"fileName": fileName, "mimeType": "application/zip", "fileSize": int64(buffer.Len())}, nil
+}
+
+func gzipOfficialBinaryFields(ctx context.Context, in engine.ExecuteInput, item dataplane.Item, inputFields []string, outputField string, outputFileName string) (map[string]dataplane.Binary, map[string]any, error) {
+	outputs := map[string]dataplane.Binary{}
+	index := 0
+	var lastName string
+	var lastSize int64
+	for _, field := range inputFields {
+		binary, ok := item.Binary[field]
+		if !ok {
+			continue
+		}
+		payload, err := binarydata.Read(ctx, in.BinaryStore, binary)
+		if err != nil {
+			return nil, nil, err
+		}
+		var buffer bytes.Buffer
+		writer := gzip.NewWriter(&buffer)
+		if _, err := writer.Write(payload); err != nil {
+			_ = writer.Close()
+			return nil, nil, err
+		}
+		if err := writer.Close(); err != nil {
+			return nil, nil, err
+		}
+		fileName := gzipOutputFileName(binary, outputFileName)
+		property := outputField
+		if index > 0 {
+			property = fmt.Sprintf("%s%d", outputField, index)
+		}
+		out, err := convertOutputBinary(ctx, in, buffer.Bytes(), "application/gzip", fileName)
+		if err != nil {
+			return nil, nil, err
+		}
+		outputs[property] = out
+		lastName = fileName
+		lastSize = int64(buffer.Len())
+		index++
+	}
+	if len(outputs) == 0 {
+		return nil, nil, fmt.Errorf("compression: none of the input binary fields were found")
+	}
+	return outputs, map[string]any{"fileName": lastName, "mimeType": "application/gzip", "fileSize": lastSize}, nil
+}
+
+func gzipOutputFileName(binary dataplane.Binary, explicit string) string {
+	if explicit != "" {
+		explicit = strings.TrimSuffix(strings.TrimSuffix(explicit, ".gzip"), ".gz")
+	}
+	base := firstNonEmptyNode(explicit, binary.FileName, "data")
+	if !strings.HasSuffix(strings.ToLower(base), ".gz") && !strings.HasSuffix(strings.ToLower(base), ".gzip") {
+		base += ".gz"
+	}
+	return base
 }
 
 func firstAvailableBinary(binary map[string]dataplane.Binary, fields []string) (dataplane.Binary, bool) {
@@ -508,12 +627,22 @@ func (Markdown) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.
 }
 
 func (ConvertToFile) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
-	operation := strings.ToLower(firstNonEmptyNode(stringParam(in.Node.Parameters, "operation"), "json"))
+	operation := normalizeConvertToFileOperation(firstNonEmptyNode(stringParam(in.Node.Parameters, "operation"), "csv"))
 	binaryProperty := stringParam(in.Node.Parameters, "binaryPropertyName", "binaryProperty", "dataPropertyName")
 	if binaryProperty == "" {
 		binaryProperty = "data"
 	}
 	items := firstInput(in.InputData)
+	switch operation {
+	case "tojson":
+		return convertToFileOfficialJSON(ctx, in, items, binaryProperty)
+	case "totext":
+		return convertToFileOfficialText(ctx, in, items, binaryProperty)
+	case "tobinary":
+		return convertToFileOfficialBinary(ctx, in, items, binaryProperty)
+	case "ical":
+		return convertToFileOfficialICal(ctx, in, items, binaryProperty)
+	}
 	if operation == "binary" {
 		return convertToFileBinary(ctx, in, items, binaryProperty)
 	}
@@ -547,17 +676,220 @@ func (ConvertToFile) Execute(ctx context.Context, in engine.ExecuteInput) (datap
 	return dataplane.MainOutput([]dataplane.Item{output}), nil
 }
 
+func normalizeConvertToFileOperation(operation string) string {
+	switch strings.ToLower(strings.TrimSpace(operation)) {
+	case "tojson":
+		return "tojson"
+	case "totext":
+		return "totext"
+	case "tobinary":
+		return "tobinary"
+	case "ical":
+		return "ical"
+	case "xls":
+		return "xlsx"
+	default:
+		return strings.ToLower(strings.TrimSpace(operation))
+	}
+}
+
+func convertToFileOfficialJSON(ctx context.Context, in engine.ExecuteInput, items []dataplane.Item, binaryProperty string) (dataplane.Output, error) {
+	mode := firstNonEmptyNode(stringParam(in.Node.Parameters, "mode"), "once")
+	options := convertFileOptions(in.Node.Parameters, "jsonOptions")
+	if mode == "each" {
+		result := make([]dataplane.Item, 0, len(items))
+		for index, item := range items {
+			content, err := convertOfficialJSONBytes(item.JSON, options)
+			if err != nil {
+				return nil, err
+			}
+			binary, err := convertOutputBinary(ctx, in, content, "application/json", firstNonEmptyNode(stringParam(options, "fileName"), "file.json"))
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, dataplane.Item{JSON: map[string]any{}, Binary: map[string]dataplane.Binary{binaryProperty: binary}, PairedItem: &dataplane.PairedItem{Item: index}})
+		}
+		return dataplane.MainOutput(result), nil
+	}
+	jsonItems := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		jsonItems = append(jsonItems, item.JSON)
+	}
+	content, err := convertOfficialJSONBytes(jsonItems, options)
+	if err != nil {
+		return nil, err
+	}
+	binary, err := convertOutputBinary(ctx, in, content, "application/json", firstNonEmptyNode(stringParam(options, "fileName"), "file.json"))
+	if err != nil {
+		return nil, err
+	}
+	return dataplane.MainOutput([]dataplane.Item{{JSON: map[string]any{}, Binary: map[string]dataplane.Binary{binaryProperty: binary}, PairedItem: &dataplane.PairedItem{Item: 0}}}), nil
+}
+
+func convertOfficialJSONBytes(value any, options map[string]any) ([]byte, error) {
+	var content []byte
+	var err error
+	if boolParam(options, "format", boolParam(options, "indent", false)) {
+		content, err = json.MarshalIndent(value, "", "  ")
+	} else {
+		content, err = json.Marshal(value)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if boolParam(options, "addBOM", false) {
+		content = append([]byte{0xEF, 0xBB, 0xBF}, content...)
+	}
+	return encodeOutputBytes(content, stringParam(options, "encoding"))
+}
+
+func convertToFileOfficialText(ctx context.Context, in engine.ExecuteInput, items []dataplane.Item, binaryProperty string) (dataplane.Output, error) {
+	options := convertFileOptions(in.Node.Parameters, "textOptions")
+	sourceProperty := stringParam(in.Node.Parameters, "sourceProperty", "fieldName")
+	result := make([]dataplane.Item, 0, len(items))
+	for index, item := range items {
+		value := convertJSONFieldValue(item.JSON, sourceProperty)
+		content, err := encodeOutputBytes([]byte(fmt.Sprint(value)), stringParam(options, "encoding"))
+		if err != nil {
+			return nil, err
+		}
+		if boolParam(options, "addBOM", false) {
+			content = append([]byte{0xEF, 0xBB, 0xBF}, content...)
+		}
+		binary, err := convertOutputBinary(ctx, in, content, "text/plain", firstNonEmptyNode(stringParam(options, "fileName"), "file.txt"))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, dataplane.Item{JSON: map[string]any{}, Binary: map[string]dataplane.Binary{binaryProperty: binary}, PairedItem: &dataplane.PairedItem{Item: index}})
+	}
+	return dataplane.MainOutput(result), nil
+}
+
+func convertToFileOfficialBinary(ctx context.Context, in engine.ExecuteInput, items []dataplane.Item, binaryProperty string) (dataplane.Output, error) {
+	options := convertFileOptions(in.Node.Parameters, "binaryOptions")
+	sourceProperty := stringParam(in.Node.Parameters, "sourceProperty", "fieldName")
+	dataIsBase64 := true
+	if in.Node.TypeVersion == 1 {
+		dataIsBase64 = boolParam(options, "dataIsBase64", true)
+	}
+	result := make([]dataplane.Item, 0, len(items))
+	for index, item := range items {
+		value := fmt.Sprint(convertJSONFieldValue(item.JSON, sourceProperty))
+		var content []byte
+		var err error
+		if dataIsBase64 {
+			content, err = base64.StdEncoding.DecodeString(value)
+			if err != nil {
+				return nil, fmt.Errorf("convertToFile toBinary: decode base64: %w", err)
+			}
+		} else {
+			content, err = encodeOutputBytes([]byte(value), stringParam(options, "encoding"))
+			if err != nil {
+				return nil, err
+			}
+			if boolParam(options, "addBOM", false) {
+				content = append([]byte{0xEF, 0xBB, 0xBF}, content...)
+			}
+		}
+		binary, err := convertOutputBinary(ctx, in, content, firstNonEmptyNode(stringParam(options, "mimeType"), "application/octet-stream"), firstNonEmptyNode(stringParam(options, "fileName"), "file.bin"))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, dataplane.Item{JSON: map[string]any{}, Binary: map[string]dataplane.Binary{binaryProperty: binary}, PairedItem: &dataplane.PairedItem{Item: index}})
+	}
+	return dataplane.MainOutput(result), nil
+}
+
+func convertToFileOfficialICal(ctx context.Context, in engine.ExecuteInput, items []dataplane.Item, binaryProperty string) (dataplane.Output, error) {
+	options := convertFileOptions(in.Node.Parameters, "icalOptions")
+	result := make([]dataplane.Item, 0, len(items))
+	for index, item := range items {
+		content := []byte(convertItemToICal(item.JSON))
+		binary, err := convertOutputBinary(ctx, in, content, "text/calendar", firstNonEmptyNode(stringParam(options, "fileName"), "event.ics"))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, dataplane.Item{JSON: map[string]any{}, Binary: map[string]dataplane.Binary{binaryProperty: binary}, PairedItem: &dataplane.PairedItem{Item: index}})
+	}
+	return dataplane.MainOutput(result), nil
+}
+
+func convertItemToICal(item map[string]any) string {
+	summary := firstNonEmptyNode(fmt.Sprint(convertJSONFieldValue(item, "summary")), fmt.Sprint(convertJSONFieldValue(item, "title")), "Event")
+	start := firstNonEmptyNode(fmt.Sprint(convertJSONFieldValue(item, "start")), fmt.Sprint(convertJSONFieldValue(item, "startDate")))
+	end := firstNonEmptyNode(fmt.Sprint(convertJSONFieldValue(item, "end")), fmt.Sprint(convertJSONFieldValue(item, "endDate")))
+	uid := firstNonEmptyNode(fmt.Sprint(convertJSONFieldValue(item, "uid")), fmt.Sprintf("%s@n8n-turbo", strings.ReplaceAll(summary, " ", "-")))
+	var builder strings.Builder
+	builder.WriteString("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//n8n-turbo//EN\r\nBEGIN:VEVENT\r\n")
+	builder.WriteString("UID:" + escapeICalText(uid) + "\r\n")
+	builder.WriteString("SUMMARY:" + escapeICalText(summary) + "\r\n")
+	if start != "" && start != "<nil>" {
+		builder.WriteString("DTSTART:" + formatICalDate(start) + "\r\n")
+	}
+	if end != "" && end != "<nil>" {
+		builder.WriteString("DTEND:" + formatICalDate(end) + "\r\n")
+	}
+	builder.WriteString("END:VEVENT\r\nEND:VCALENDAR\r\n")
+	return builder.String()
+}
+
+func escapeICalText(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "\n", `\n`)
+	value = strings.ReplaceAll(value, ",", `\,`)
+	value = strings.ReplaceAll(value, ";", `\;`)
+	return value
+}
+
+func formatICalDate(value string) string {
+	value = strings.TrimSpace(value)
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.UTC().Format("20060102T150405Z")
+	}
+	return strings.NewReplacer("-", "", ":", "", " ", "T").Replace(value)
+}
+
+func convertJSONFieldValue(item map[string]any, field string) any {
+	if field == "" {
+		return item
+	}
+	if strings.Contains(field, ".") {
+		return nestedMergeValue(item, field)
+	}
+	return item[field]
+}
+
+func convertOutputBinary(ctx context.Context, in engine.ExecuteInput, content []byte, mimeType string, fileName string) (dataplane.Binary, error) {
+	binary := dataplane.Binary{Data: base64.StdEncoding.EncodeToString(content), MimeType: mimeType, FileName: fileName, FileSize: int64(len(content)), FileExtension: strings.TrimPrefix(filepath.Ext(fileName), ".")}
+	if in.BinaryStore == nil {
+		return binary, nil
+	}
+	ref, err := in.BinaryStore.Put(ctx, mimeType, fileName, bytes.NewReader(content))
+	if err != nil {
+		return dataplane.Binary{}, err
+	}
+	binary = binarydata.BinaryFromRef(ref)
+	binary.FileExtension = strings.TrimPrefix(filepath.Ext(fileName), ".")
+	return binary, nil
+}
+
 func convertItemsToFile(operation string, items []map[string]any, params map[string]any) ([]byte, string, string, error) {
 	switch operation {
 	case "csv":
 		content, err := convertToCSV(items, params)
 		return content, "text/csv; charset=UTF-8", "export.csv", err
+	case "ods":
+		content, err := convertToODS(items, params)
+		return content, "application/vnd.oasis.opendocument.spreadsheet", "export.ods", err
 	case "xlsx":
 		content, err := convertToXLSX(items, params)
 		return content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "export.xlsx", err
 	case "html":
 		content, err := convertToHTML(items, params)
 		return content, "text/html; charset=UTF-8", "export.html", err
+	case "rtf":
+		content, err := convertToRTF(items, params)
+		return content, "application/rtf", "export.rtf", err
 	case "text", "txt":
 		content, err := convertToText(items, params)
 		return content, "text/plain; charset=UTF-8", "export.txt", err
@@ -680,6 +1012,112 @@ func convertToXLSX(items []map[string]any, params map[string]any) ([]byte, error
 		return nil, fmt.Errorf("xlsx: write workbook: %w", err)
 	}
 	return buffer.Bytes(), nil
+}
+
+func convertToODS(items []map[string]any, params map[string]any) ([]byte, error) {
+	options := convertFileOptions(params, "odsOptions")
+	sheetName := firstNonEmptyNode(stringParam(options, "sheetName"), stringParam(params, "sheetName"), "Sheet1")
+	includeHeader := boolParam(options, "includeHeader", boolParam(params, "includeHeader", true))
+	headers := collectConvertKeys(items)
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	mimeHeader := &zip.FileHeader{Name: "mimetype", Method: zip.Store}
+	mime, err := writer.CreateHeader(mimeHeader)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := mime.Write([]byte("application/vnd.oasis.opendocument.spreadsheet")); err != nil {
+		return nil, err
+	}
+	if err := writeZipFile(writer, "META-INF/manifest.xml", odsManifestXML()); err != nil {
+		return nil, err
+	}
+	if err := writeZipFile(writer, "content.xml", odsContentXML(sheetName, headers, items, includeHeader)); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func writeZipFile(writer *zip.Writer, name string, content string) error {
+	file, err := writer.Create(name)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write([]byte(content))
+	return err
+}
+
+func odsManifestXML() string {
+	return `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2">` +
+		`<manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/>` +
+		`<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>` +
+		`</manifest:manifest>`
+}
+
+func odsContentXML(sheetName string, headers []string, items []map[string]any, includeHeader bool) string {
+	var builder strings.Builder
+	builder.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
+	builder.WriteString(`<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:officeooo="http://openoffice.org/2009/office" office:version="1.2">`)
+	builder.WriteString(`<office:body><office:spreadsheet><table:table table:name="`)
+	builder.WriteString(html.EscapeString(sheetName))
+	builder.WriteString(`">`)
+	if includeHeader {
+		odsWriteRow(&builder, headers)
+	}
+	for _, item := range items {
+		values := make([]string, 0, len(headers))
+		for _, key := range headers {
+			values = append(values, formatConvertValue(item[key], ""))
+		}
+		odsWriteRow(&builder, values)
+	}
+	builder.WriteString(`</table:table></office:spreadsheet></office:body></office:document-content>`)
+	return builder.String()
+}
+
+func odsWriteRow(builder *strings.Builder, values []string) {
+	builder.WriteString(`<table:table-row>`)
+	for _, value := range values {
+		builder.WriteString(`<table:table-cell office:value-type="string"><text:p>`)
+		builder.WriteString(html.EscapeString(value))
+		builder.WriteString(`</text:p></table:table-cell>`)
+	}
+	builder.WriteString(`</table:table-row>`)
+}
+
+func convertToRTF(items []map[string]any, params map[string]any) ([]byte, error) {
+	options := convertFileOptions(params, "rtfOptions")
+	headers := collectConvertKeys(items)
+	includeHeader := boolParam(options, "includeHeader", boolParam(params, "includeHeader", true))
+	var builder strings.Builder
+	builder.WriteString(`{\rtf1\ansi\deff0`)
+	if includeHeader && len(headers) > 0 {
+		builder.WriteString(`\b `)
+		builder.WriteString(rtfEscape(strings.Join(headers, "\t")))
+		builder.WriteString(`\b0\par `)
+	}
+	for _, item := range items {
+		values := make([]string, 0, len(headers))
+		for _, key := range headers {
+			values = append(values, formatConvertValue(item[key], ""))
+		}
+		builder.WriteString(rtfEscape(strings.Join(values, "\t")))
+		builder.WriteString(`\par `)
+	}
+	builder.WriteString(`}`)
+	return []byte(builder.String()), nil
+}
+
+func rtfEscape(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `{`, `\{`)
+	value = strings.ReplaceAll(value, `}`, `\}`)
+	value = strings.ReplaceAll(value, "\n", `\line `)
+	return value
 }
 
 func convertToHTML(items []map[string]any, params map[string]any) ([]byte, error) {

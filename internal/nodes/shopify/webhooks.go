@@ -17,7 +17,7 @@ func (n *Node) handleWebhook(ctx context.Context, cred Credential, operation str
 		result, err := n.doJSON(ctx, cred, http.MethodGet, "/webhooks.json", nil)
 		return itemsFromArray(listFrom(result, "webhooks"), err)
 	case OpGet:
-		id := int64Param(params, "webhookId")
+		id := firstInt64(params, "webhookId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("webhookId is required")
 		}
@@ -28,7 +28,7 @@ func (n *Node) handleWebhook(ctx context.Context, cred Credential, operation str
 	case OpUpdate:
 		return singleValue(n.updateWebhook(ctx, cred, params))
 	case OpDelete:
-		id := int64Param(params, "webhookId")
+		id := firstInt64(params, "webhookId", "id")
 		if id == 0 {
 			return nil, fmt.Errorf("webhookId is required")
 		}
@@ -61,7 +61,7 @@ func (n *Node) createWebhook(ctx context.Context, cred Credential, params map[st
 }
 
 func (n *Node) updateWebhook(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
-	id := int64Param(params, "webhookId")
+	id := firstInt64(params, "webhookId", "id")
 	if id == 0 {
 		return nil, fmt.Errorf("webhookId is required")
 	}

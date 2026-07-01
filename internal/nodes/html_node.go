@@ -30,6 +30,9 @@ type htmlExtractionValue struct {
 func executeHTMLNode(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
 	operation := strings.ToLower(firstNonEmptyNode(stringParam(in.Node.Parameters, "operation"), "generateHtml"))
 	items := firstInput(in.InputData)
+	if operation == "converttohtmltable" {
+		return dataplane.MainOutput([]dataplane.Item{{JSON: map[string]any{"table": htmlTableFromItems(items, htmlNodeOptions(in.Node.Parameters))}}}), nil
+	}
 	output := make([]dataplane.Item, 0, len(items))
 	for index, item := range items {
 		select {
@@ -38,7 +41,7 @@ func executeHTMLNode(ctx context.Context, in engine.ExecuteInput) (dataplane.Out
 		default:
 		}
 		switch operation {
-		case "generatehtml", "generate":
+		case "generatehtmltemplate", "generatehtml", "generate":
 			next, err := generateHTMLItem(in.Node.Parameters, item)
 			if err != nil {
 				return nil, fmt.Errorf("html generateHtml item %d: %w", index, err)
@@ -55,6 +58,90 @@ func executeHTMLNode(ctx context.Context, in engine.ExecuteInput) (dataplane.Out
 		}
 	}
 	return dataplane.MainOutput(output), nil
+}
+
+func htmlTableFromItems(items []dataplane.Item, options map[string]any) string {
+	headers := []string{}
+	seen := map[string]bool{}
+	for _, item := range items {
+		for key := range item.JSON {
+			if !seen[key] {
+				seen[key] = true
+				headers = append(headers, key)
+			}
+		}
+	}
+	tableStyle, headerStyle, cellStyle := "", "", ""
+	if !boolParam(options, "customStyling", false) {
+		tableStyle = "style='border-spacing:0; font-family:helvetica,arial,sans-serif'"
+		headerStyle = "style='margin:0; padding:7px 20px 7px 0px; border-bottom:1px solid #eee; text-align:left; color:#888; font-weight:normal'"
+		cellStyle = "style='margin:0; padding:7px 20px 7px 0px; border-bottom:1px solid #eee'"
+	}
+	var builder strings.Builder
+	builder.WriteString("<table ")
+	builder.WriteString(tableStyle)
+	if attrs := stringParam(options, "tableAttributes"); attrs != "" {
+		builder.WriteByte(' ')
+		builder.WriteString(attrs)
+	}
+	builder.WriteString(">")
+	if caption := stringParam(options, "caption"); caption != "" {
+		builder.WriteString("<caption>")
+		builder.WriteString(caption)
+		builder.WriteString("</caption>")
+	}
+	builder.WriteString("<thead ")
+	builder.WriteString(headerStyle)
+	if attrs := stringParam(options, "headerAttributes"); attrs != "" {
+		builder.WriteByte(' ')
+		builder.WriteString(attrs)
+	}
+	builder.WriteString("><tr>")
+	for _, header := range headers {
+		builder.WriteString("<th>")
+		builder.WriteString(capitalizeHTMLHeader(header, boolParam(options, "capitalize", false)))
+		builder.WriteString("</th>")
+	}
+	builder.WriteString("</tr></thead><tbody>")
+	for _, item := range items {
+		builder.WriteString("<tr>")
+		for _, header := range headers {
+			builder.WriteString("<td ")
+			builder.WriteString(cellStyle)
+			if attrs := stringParam(options, "cellAttributes"); attrs != "" {
+				builder.WriteByte(' ')
+				builder.WriteString(attrs)
+			}
+			builder.WriteString(">")
+			if value, ok := item.JSON[header].(bool); ok {
+				if value {
+					builder.WriteString(`<input type="checkbox" checked="checked"/>`)
+				} else {
+					builder.WriteString(`<input type="checkbox" />`)
+				}
+			} else {
+				builder.WriteString(fmt.Sprint(item.JSON[header]))
+			}
+			builder.WriteString("</td>")
+		}
+		builder.WriteString("</tr>")
+	}
+	builder.WriteString("</tbody></table>")
+	return builder.String()
+}
+
+func capitalizeHTMLHeader(header string, enabled bool) string {
+	if !enabled || header == "" {
+		return header
+	}
+	words := strings.FieldsFunc(header, func(r rune) bool { return r == '_' || r == '-' || r == ' ' })
+	for index, word := range words {
+		if word == "" {
+			continue
+		}
+		words[index] = strings.ToUpper(word[:1]) + word[1:]
+	}
+	return strings.Join(words, " ")
 }
 
 func generateHTMLItem(params map[string]any, item dataplane.Item) (dataplane.Item, error) {

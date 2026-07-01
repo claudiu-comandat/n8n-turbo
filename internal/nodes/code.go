@@ -4,13 +4,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +46,9 @@ func executeJavaScriptCode(ctx context.Context, in engine.ExecuteInput) (datapla
 		return dataplane.MainOutput(items), nil
 	}
 	timeout := codeTimeout(in.Node.Parameters)
+	if shouldUseNodeJavaScriptRuntime(source) {
+		return executeNodeJavaScriptCode(ctx, in, source, items, timeout)
+	}
 	mode := codeMode(in.Node.Parameters, in.Node.Type)
 	if mode == "runOnceForEachItem" {
 		output := make([]dataplane.Item, 0, len(items))
@@ -49,7 +56,7 @@ func executeJavaScriptCode(ctx context.Context, in engine.ExecuteInput) (datapla
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			result, err := runJavaScript(ctx, timeout, source, items, item, index, in.Node)
+			result, err := runJavaScript(ctx, timeout, source, items, item, index, in.Node, in.RunData)
 			if err != nil {
 				return nil, err
 			}
@@ -57,11 +64,11 @@ func executeJavaScriptCode(ctx context.Context, in engine.ExecuteInput) (datapla
 				output = append(output, item)
 				continue
 			}
-			converted, err := codeItemsFromAny(result)
+			converted, err := codeSingleItemFromAny(result, index)
 			if err != nil {
 				return nil, err
 			}
-			output = append(output, converted...)
+			output = append(output, converted)
 		}
 		return dataplane.MainOutput(output), nil
 	}
@@ -69,7 +76,7 @@ func executeJavaScriptCode(ctx context.Context, in engine.ExecuteInput) (datapla
 	if len(items) > 0 {
 		current = items[0]
 	}
-	result, err := runJavaScript(ctx, timeout, source, items, current, 0, in.Node)
+	result, err := runJavaScript(ctx, timeout, source, items, current, 0, in.Node, in.RunData)
 	if err != nil {
 		return nil, err
 	}
@@ -83,16 +90,203 @@ func executeJavaScriptCode(ctx context.Context, in engine.ExecuteInput) (datapla
 	return dataplane.MainOutput(converted), nil
 }
 
-func runJavaScript(ctx context.Context, timeout time.Duration, source string, items []dataplane.Item, item dataplane.Item, index int, node dataplane.Node) (any, error) {
+func shouldUseNodeJavaScriptRuntime(source string) bool {
+	return strings.Contains(source, "require('playwright-extra')") ||
+		strings.Contains(source, `require("playwright-extra")`) ||
+		usesDotAllRegexp(source)
+}
+
+func usesDotAllRegexp(source string) bool {
+	return strings.Contains(source, "/s)") ||
+		strings.Contains(source, "/s;") ||
+		strings.Contains(source, "/s,") ||
+		strings.Contains(source, "/s]")
+}
+
+func executeNodeJavaScriptCode(ctx context.Context, in engine.ExecuteInput, source string, items []dataplane.Item, timeout time.Duration) (dataplane.Output, error) {
+	mode := codeMode(in.Node.Parameters, in.Node.Type)
+	if mode == "runOnceForEachItem" {
+		output := make([]dataplane.Item, 0, len(items))
+		for index, item := range items {
+			result, err := runNodeJavaScript(ctx, timeout, source, items, item, index, in.Node, in.RunData)
+			if err != nil {
+				return nil, err
+			}
+			if result == nil {
+				output = append(output, item)
+				continue
+			}
+			converted, err := codeSingleItemFromAny(result, index)
+			if err != nil {
+				return nil, err
+			}
+			output = append(output, converted)
+		}
+		return dataplane.MainOutput(output), nil
+	}
+	current := dataplane.Item{JSON: map[string]any{}}
+	if len(items) > 0 {
+		current = items[0]
+	}
+	result, err := runNodeJavaScript(ctx, timeout, source, items, current, 0, in.Node, in.RunData)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return dataplane.MainOutput(items), nil
+	}
+	converted, err := codeItemsFromAny(result)
+	if err != nil {
+		return nil, err
+	}
+	return dataplane.MainOutput(converted), nil
+}
+
+func runNodeJavaScript(ctx context.Context, timeout time.Duration, source string, items []dataplane.Item, item dataplane.Item, index int, node dataplane.Node, runData dataplane.RunData) (any, error) {
+	payload, err := json.Marshal(map[string]any{
+		"source":  source,
+		"items":   items,
+		"item":    item,
+		"index":   index,
+		"node":    node,
+		"runData": runData,
+	})
+	if err != nil {
+		return nil, err
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, "node", "-e", nodeJavaScriptRunnerSource)
+	cmd.Stdin = bytes.NewReader(payload)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if runCtx.Err() != nil {
+			return nil, fmt.Errorf("node javascript code execution timed out")
+		}
+		if text := strings.TrimSpace(stderr.String()); text != "" {
+			return nil, fmt.Errorf("node javascript failed: %s", text)
+		}
+		return nil, err
+	}
+	var envelope struct {
+		OK     bool   `json:"ok"`
+		Result any    `json:"result"`
+		Error  string `json:"error"`
+		Stack  string `json:"stack"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		if text := strings.TrimSpace(stderr.String()); text != "" {
+			return nil, fmt.Errorf("node javascript returned invalid output: %w: %s", err, text)
+		}
+		return nil, fmt.Errorf("node javascript returned invalid output: %w", err)
+	}
+	if !envelope.OK {
+		if envelope.Stack != "" {
+			return nil, fmt.Errorf("%s", envelope.Stack)
+		}
+		return nil, fmt.Errorf("%s", envelope.Error)
+	}
+	return envelope.Result, nil
+}
+
+const nodeJavaScriptRunnerSource = `
+const fs = require('fs');
+const util = require('util');
+
+(async () => {
+  const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+  const items = input.items || [];
+  const item = input.item || { json: {} };
+  const runData = input.runData || {};
+  const node = input.node || {};
+  const now = new Date();
+
+  const runDataItems = (nodeName) => {
+    const tasks = runData[nodeName] || [];
+    const last = tasks[tasks.length - 1];
+    const main = last && last.data && last.data.main;
+    return (main && main[0]) || [];
+  };
+  const nodeData = {};
+  for (const nodeName of Object.keys(runData)) {
+    const nodeItems = runDataItems(nodeName);
+    nodeData[nodeName] = nodeItems[0] || { json: {} };
+  }
+
+  globalThis.items = items;
+  globalThis.item = item;
+  globalThis.$json = item.json || {};
+  globalThis.$binary = item.binary || {};
+  globalThis.$itemIndex = input.index || 0;
+  globalThis.$node = Object.assign({ id: node.id, name: node.name, type: node.type }, nodeData);
+  globalThis.$now = now;
+  globalThis.$today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  globalThis.$input = {
+    all: () => items,
+    first: () => items[0] || null,
+    last: () => items[items.length - 1] || null,
+    item,
+  };
+  globalThis.$items = runDataItems;
+  globalThis.$ = (nodeName) => {
+    const nodeItems = runDataItems(nodeName);
+    return {
+      all: () => nodeItems,
+      first: () => nodeItems[0] || null,
+      last: () => nodeItems[nodeItems.length - 1] || null,
+    };
+  };
+  globalThis.$getWorkflowStaticData = () => ({});
+  globalThis.console = {
+    log: (...args) => process.stderr.write(args.map((v) => util.format(v)).join(' ') + '\n'),
+    warn: (...args) => process.stderr.write(args.map((v) => util.format(v)).join(' ') + '\n'),
+    error: (...args) => process.stderr.write(args.map((v) => util.format(v)).join(' ') + '\n'),
+  };
+
+  try {
+    const fn = new Function('require', '"use strict"; return (async function(){\n' + input.source + '\n})();');
+    const result = await fn(require);
+    const seen = new WeakSet();
+    process.stdout.write(JSON.stringify({ ok: true, result }, (_key, value) => {
+      if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) {
+        return value.toString('base64');
+      }
+      if (value && typeof value === 'object') {
+        if (seen.has(value)) return '[Circular]';
+        seen.add(value);
+      }
+      return value;
+    }));
+  } catch (error) {
+    process.stdout.write(JSON.stringify({
+      ok: false,
+      error: error && error.message ? error.message : String(error),
+      stack: error && error.stack ? error.stack : '',
+    }));
+  }
+})().catch((error) => {
+  process.stdout.write(JSON.stringify({
+    ok: false,
+    error: error && error.message ? error.message : String(error),
+    stack: error && error.stack ? error.stack : '',
+  }));
+});
+`
+
+func runJavaScript(ctx context.Context, timeout time.Duration, source string, items []dataplane.Item, item dataplane.Item, index int, node dataplane.Node, runData dataplane.RunData) (any, error) {
 	vm := goja.New()
 	jsItems := codeInputItems(items)
 	jsItem := codeInputItem(item)
+	installJavaScriptCompat(vm, ctx, timeout, runData)
 	_ = vm.Set("items", jsItems)
 	_ = vm.Set("item", jsItem)
 	_ = vm.Set("$json", item.JSON)
 	_ = vm.Set("$binary", codeInputBinary(item.Binary))
 	_ = vm.Set("$itemIndex", index)
-	_ = vm.Set("$node", map[string]any{"id": node.ID, "name": node.Name, "type": node.Type})
+	_ = vm.Set("$node", codeNodeData(runData, node))
 	now := time.Now()
 	if jsNow, err := vm.RunString(fmt.Sprintf("new Date(%d)", now.UnixMilli())); err == nil {
 		_ = vm.Set("$now", jsNow)
@@ -117,19 +311,13 @@ func runJavaScript(ctx context.Context, timeout time.Duration, source string, it
 			}
 			return jsItems[len(jsItems)-1]
 		},
-		"item": func() any {
-			return jsItem
-		},
+		"item": jsItem,
 	})
 	_ = vm.Set("console", map[string]any{
 		"log":   func(...any) {},
 		"error": func(...any) {},
 		"warn":  func(...any) {},
 	})
-	_ = vm.Set("fetch", func(call goja.FunctionCall) goja.Value {
-		return jsFetch(vm, ctx, timeout, call)
-	})
-	_ = vm.Set("require", goja.Undefined())
 	_ = vm.Set("process", goja.Undefined())
 	_ = vm.Set("$getWorkflowStaticData", func(scope string) map[string]any {
 		return map[string]any{}
@@ -171,6 +359,375 @@ func runJavaScript(ctx context.Context, timeout time.Duration, source string, it
 		return nil, nil
 	}
 	return value.Export(), nil
+}
+
+func installJavaScriptCompat(vm *goja.Runtime, ctx context.Context, timeout time.Duration, runData dataplane.RunData) {
+	fetch := func(call goja.FunctionCall) goja.Value {
+		return jsFetch(vm, ctx, timeout, call)
+	}
+	_ = vm.Set("fetch", fetch)
+	_ = vm.Set("Buffer", jsBufferModule(vm))
+	_ = vm.Set("$items", func(nodeName string) []map[string]any {
+		return codeRunDataItems(runData, nodeName)
+	})
+	_ = vm.Set("$", func(nodeName string) map[string]any {
+		items := codeRunDataItems(runData, nodeName)
+		return map[string]any{
+			"all": func() []map[string]any {
+				return items
+			},
+			"first": func() any {
+				if len(items) == 0 {
+					return nil
+				}
+				return items[0]
+			},
+			"last": func() any {
+				if len(items) == 0 {
+					return nil
+				}
+				return items[len(items)-1]
+			},
+		}
+	})
+	_ = vm.Set("setTimeout", func(call goja.FunctionCall) goja.Value {
+		if len(call.Arguments) == 0 {
+			return goja.Undefined()
+		}
+		delay := int64(0)
+		if len(call.Arguments) > 1 {
+			delay = call.Arguments[1].ToInteger()
+		}
+		if delay > 0 {
+			time.Sleep(time.Duration(delay) * time.Millisecond)
+		}
+		if fn, ok := goja.AssertFunction(call.Arguments[0]); ok {
+			_, _ = fn(goja.Undefined())
+		}
+		return vm.ToValue(1)
+	})
+	_ = vm.Set("clearTimeout", func(any) {})
+	_ = vm.Set("require", func(name string) goja.Value {
+		switch name {
+		case "node-fetch":
+			return vm.ToValue(fetch)
+		case "crypto":
+			return vm.ToValue(jsCryptoModule(vm))
+		case "https":
+			return vm.ToValue(jsHTTPModule(vm, ctx, timeout, "https"))
+		case "http":
+			return vm.ToValue(jsHTTPModule(vm, ctx, timeout, "http"))
+		case "url":
+			return vm.ToValue(map[string]any{"URL": vm.Get("URL")})
+		default:
+			panic(vm.NewGoError(fmt.Errorf("require(%q) is not available in n8n-turbo Code node", name)))
+		}
+	})
+	_, _ = vm.RunString(`if (typeof URL === 'undefined') {
+		globalThis.URL = function URL(raw) {
+			const match = String(raw).match(/^(https?:)\/\/([^\/?#:]+)(?::(\d+))?([^?#]*)?(\?[^#]*)?/);
+			if (!match) throw new Error('Invalid URL: ' + raw);
+			this.href = String(raw);
+			this.protocol = match[1];
+			this.hostname = match[2];
+			this.host = match[2] + (match[3] ? ':' + match[3] : '');
+			this.port = match[3] || '';
+			this.pathname = match[4] || '/';
+			this.search = match[5] || '';
+		};
+	}`)
+}
+
+func codeRunDataItems(runData dataplane.RunData, nodeName string) []map[string]any {
+	tasks := runData[nodeName]
+	if len(tasks) == 0 {
+		return nil
+	}
+	main := tasks[len(tasks)-1].Data["main"]
+	if len(main) == 0 {
+		return nil
+	}
+	return codeInputItems(main[0])
+}
+
+func codeNodeData(runData dataplane.RunData, node dataplane.Node) map[string]any {
+	result := map[string]any{"id": node.ID, "name": node.Name, "type": node.Type}
+	for name := range runData {
+		items := codeRunDataItems(runData, name)
+		if len(items) == 0 {
+			result[name] = map[string]any{"json": map[string]any{}}
+			continue
+		}
+		result[name] = items[0]
+	}
+	return result
+}
+
+func jsBufferModule(vm *goja.Runtime) map[string]any {
+	return map[string]any{
+		"from": func(call goja.FunctionCall) goja.Value {
+			encoding := ""
+			if len(call.Arguments) > 1 {
+				encoding = call.Arguments[1].String()
+			}
+			return jsBufferObject(vm, jsBytesFromValue(vm, call.Arguments[0], encoding))
+		},
+		"concat": func(call goja.FunctionCall) goja.Value {
+			if len(call.Arguments) == 0 {
+				return jsBufferObject(vm, nil)
+			}
+			array := call.Arguments[0].ToObject(vm)
+			length := int(array.Get("length").ToInteger())
+			var out []byte
+			for index := 0; index < length; index++ {
+				out = append(out, jsBytesFromValue(vm, array.Get(fmt.Sprint(index)), "")...)
+			}
+			return jsBufferObject(vm, out)
+		},
+		"byteLength": func(value any) int {
+			return len([]byte(fmt.Sprint(value)))
+		},
+	}
+}
+
+func jsBufferObject(vm *goja.Runtime, data []byte) goja.Value {
+	encoded := base64.StdEncoding.EncodeToString(data)
+	object := vm.NewObject()
+	_ = object.Set("__n8nBytes", encoded)
+	_ = object.Set("length", len(data))
+	_ = object.Set("toString", func(call goja.FunctionCall) goja.Value {
+		encoding := "utf8"
+		if len(call.Arguments) > 0 {
+			encoding = strings.ToLower(call.Arguments[0].String())
+		}
+		switch encoding {
+		case "base64":
+			return vm.ToValue(encoded)
+		case "hex":
+			return vm.ToValue(fmt.Sprintf("%x", data))
+		default:
+			return vm.ToValue(string(data))
+		}
+	})
+	return object
+}
+
+func jsBytesFromValue(vm *goja.Runtime, value goja.Value, encoding string) []byte {
+	if goja.IsUndefined(value) || goja.IsNull(value) {
+		return nil
+	}
+	if _, ok := value.Export().(map[string]any); ok {
+		object := value.ToObject(vm)
+		if raw := object.Get("__n8nBytes"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+			decoded, _ := base64.StdEncoding.DecodeString(raw.String())
+			return decoded
+		}
+	}
+	text := value.String()
+	switch strings.ToLower(encoding) {
+	case "base64":
+		decoded, err := base64.StdEncoding.DecodeString(text)
+		if err == nil {
+			return decoded
+		}
+	}
+	return []byte(text)
+}
+
+func jsCryptoModule(vm *goja.Runtime) map[string]any {
+	return map[string]any{
+		"createHash": func(algorithm string) map[string]any {
+			algorithm = strings.ToLower(algorithm)
+			var data []byte
+			hash := map[string]any{}
+			hash["update"] = func(value any) map[string]any {
+				data = append(data, []byte(fmt.Sprint(value))...)
+				return hash
+			}
+			hash["digest"] = func(encoding string) string {
+				switch algorithm {
+				case "md5":
+					sum := md5.Sum(data)
+					if strings.EqualFold(encoding, "base64") {
+						return base64.StdEncoding.EncodeToString(sum[:])
+					}
+					return fmt.Sprintf("%x", sum)
+				default:
+					panic(vm.NewGoError(fmt.Errorf("crypto hash %s is not available", algorithm)))
+				}
+			}
+			return hash
+		},
+	}
+}
+
+func jsHTTPModule(vm *goja.Runtime, ctx context.Context, fallbackTimeout time.Duration, protocol string) map[string]any {
+	return map[string]any{
+		"request": func(call goja.FunctionCall) goja.Value {
+			return jsHTTPRequest(vm, ctx, fallbackTimeout, protocol, call)
+		},
+	}
+}
+
+func jsHTTPRequest(vm *goja.Runtime, ctx context.Context, fallbackTimeout time.Duration, protocol string, call goja.FunctionCall) goja.Value {
+	options := map[string]any{}
+	callback := goja.Callable(nil)
+	if len(call.Arguments) > 0 {
+		if fn, ok := goja.AssertFunction(call.Arguments[len(call.Arguments)-1]); ok {
+			callback = fn
+		}
+		options = jsRequestOptions(vm, call.Arguments[0])
+	}
+	handlers := map[string]goja.Callable{}
+	var body []byte
+	timeout := fallbackTimeout
+	if value, ok := options["timeout"]; ok {
+		if ms, err := strconv.ParseInt(fmt.Sprint(value), 10, 64); err == nil && ms > 0 {
+			timeout = time.Duration(ms) * time.Millisecond
+		}
+	}
+	request := vm.NewObject()
+	_ = request.Set("on", func(event string, handler goja.Value) goja.Value {
+		if fn, ok := goja.AssertFunction(handler); ok {
+			handlers[event] = fn
+		}
+		return request
+	})
+	_ = request.Set("write", func(value goja.Value) {
+		body = append(body, jsBytesFromValue(vm, value, "")...)
+	})
+	_ = request.Set("setTimeout", func(ms int64, handler goja.Value) {
+		if ms > 0 {
+			timeout = time.Duration(ms) * time.Millisecond
+		}
+		if fn, ok := goja.AssertFunction(handler); ok {
+			handlers["timeout"] = fn
+		}
+	})
+	_ = request.Set("destroy", func(args ...goja.Value) {
+		if fn := handlers["error"]; fn != nil && len(args) > 0 {
+			_, _ = fn(goja.Undefined(), args[0])
+		}
+	})
+	_ = request.Set("end", func() {
+		response, payload, err := jsDoHTTPRequest(ctx, options, protocol, body, timeout)
+		if err != nil {
+			if fn := handlers["timeout"]; fn != nil && strings.Contains(strings.ToLower(err.Error()), "timeout") {
+				_, _ = fn(goja.Undefined())
+				return
+			}
+			if fn := handlers["error"]; fn != nil {
+				_, _ = fn(goja.Undefined(), vm.NewGoError(err))
+				return
+			}
+			panic(vm.NewGoError(err))
+		}
+		if callback != nil {
+			res := jsHTTPResponseObject(vm, response, payload)
+			_, _ = callback(goja.Undefined(), res)
+			jsEmitResponse(vm, res, payload)
+		}
+	})
+	return request
+}
+
+func jsRequestOptions(vm *goja.Runtime, value goja.Value) map[string]any {
+	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+		return nil
+	}
+	if raw := value.String(); strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return nil
+		}
+		return map[string]any{"protocol": parsed.Scheme + ":", "hostname": parsed.Hostname(), "port": parsed.Port(), "path": parsed.RequestURI(), "method": "GET"}
+	}
+	object := value.ToObject(vm)
+	result := map[string]any{}
+	for _, key := range object.Keys() {
+		result[key] = object.Get(key).Export()
+	}
+	return result
+}
+
+func jsDoHTTPRequest(ctx context.Context, options map[string]any, protocol string, body []byte, timeout time.Duration) (*http.Response, []byte, error) {
+	scheme := strings.TrimSuffix(firstNonEmptyNode(fmt.Sprint(options["protocol"]), protocol), ":")
+	if scheme != "http" && scheme != "https" {
+		scheme = protocol
+	}
+	host := firstNonEmptyNode(fmt.Sprint(options["hostname"]), fmt.Sprint(options["host"]))
+	if host == "" || host == "<nil>" {
+		return nil, nil, fmt.Errorf("http request hostname is required")
+	}
+	if port := fmt.Sprint(options["port"]); port != "" && port != "<nil>" && !strings.Contains(host, ":") {
+		host += ":" + port
+	}
+	requestPath := firstNonEmptyNode(fmt.Sprint(options["path"]), "/")
+	if !strings.HasPrefix(requestPath, "/") {
+		requestPath = "/" + requestPath
+	}
+	method := strings.ToUpper(firstNonEmptyNode(fmt.Sprint(options["method"]), http.MethodGet))
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, method, scheme+"://"+host+requestPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, err
+	}
+	if headers, ok := options["headers"].(map[string]any); ok {
+		for key, value := range headers {
+			req.Header.Set(key, fmt.Sprint(value))
+		}
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	payload, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp, payload, readErr
+}
+
+func jsHTTPResponseObject(vm *goja.Runtime, response *http.Response, payload []byte) *goja.Object {
+	handlers := map[string][]goja.Callable{}
+	res := vm.NewObject()
+	_ = res.Set("statusCode", response.StatusCode)
+	_ = res.Set("status", response.StatusCode)
+	_ = res.Set("headers", responseHeadersMap(response.Header))
+	_ = res.Set("on", func(event string, handler goja.Value) *goja.Object {
+		if fn, ok := goja.AssertFunction(handler); ok {
+			handlers[event] = append(handlers[event], fn)
+		}
+		return res
+	})
+	_ = res.Set("__emit", func(event string) {
+		for _, fn := range handlers[event] {
+			if event == "data" {
+				_, _ = fn(goja.Undefined(), jsBufferObject(vm, payload))
+			} else {
+				_, _ = fn(goja.Undefined())
+			}
+		}
+	})
+	return res
+}
+
+func jsEmitResponse(vm *goja.Runtime, res *goja.Object, payload []byte) {
+	if emit, ok := goja.AssertFunction(res.Get("__emit")); ok {
+		if len(payload) > 0 {
+			_, _ = emit(res, vm.ToValue("data"))
+		}
+		_, _ = emit(res, vm.ToValue("end"))
+	}
+}
+
+func responseHeadersMap(headers http.Header) map[string]string {
+	result := map[string]string{}
+	for key, values := range headers {
+		if len(values) > 0 {
+			result[strings.ToLower(key)] = values[0]
+		}
+	}
+	return result
 }
 
 func jsFetch(vm *goja.Runtime, ctx context.Context, timeout time.Duration, call goja.FunctionCall) goja.Value {
@@ -270,7 +827,13 @@ func executePythonCode(ctx context.Context, in engine.ExecuteInput) (dataplane.O
 			if err != nil {
 				return nil, err
 			}
-			output = append(output, result...)
+			for _, current := range result {
+				converted, err := codeSingleItemFromAny(current, index)
+				if err != nil {
+					return nil, err
+				}
+				output = append(output, converted)
+			}
 		}
 		return dataplane.MainOutput(output), nil
 	}
@@ -438,6 +1001,10 @@ items = payload.get("items") or []
 item = payload.get("item") or {"json": {}}
 json_data = item.get("json") or {}
 binary = item.get("binary") or {}
+_items = items
+_item = item
+_json = json_data
+_binary = binary
 item_index = payload.get("itemIndex", 0)
 node = payload.get("node") or {}
 now = datetime.datetime.utcnow().isoformat() + "Z"
@@ -476,6 +1043,10 @@ items = []
 item = {"json": {}}
 json_data = {}
 binary = {}
+_items = items
+_item = item
+_json = json_data
+_binary = binary
 item_index = 0
 node = {}
 now = datetime.datetime.utcnow().isoformat() + "Z"
@@ -506,6 +1077,10 @@ for line in sys.stdin:
         item = payload.get("item") or {"json": {}}
         json_data = item.get("json") or {}
         binary = item.get("binary") or {}
+        _items = items
+        _item = item
+        _json = json_data
+        _binary = binary
         item_index = payload.get("itemIndex", 0)
         node = payload.get("node") or {}
         now = datetime.datetime.utcnow().isoformat() + "Z"
@@ -657,7 +1232,13 @@ func executeGoCode(ctx context.Context, in engine.ExecuteInput) (dataplane.Outpu
 			if err != nil {
 				return nil, err
 			}
-			output = append(output, result...)
+			for _, current := range result {
+				converted, err := codeSingleItemFromAny(current, index)
+				if err != nil {
+					return nil, err
+				}
+				output = append(output, converted)
+			}
 		}
 		return dataplane.MainOutput(output), nil
 	}
@@ -943,12 +1524,29 @@ func codeItemsFromAny(value any) ([]dataplane.Item, error) {
 	return items, nil
 }
 
+func codeSingleItemFromAny(value any, index int) (dataplane.Item, error) {
+	if value == nil {
+		return dataplane.Item{}, fmt.Errorf("code node item %d must return an object", index)
+	}
+	if _, ok := value.([]any); ok {
+		return dataplane.Item{}, fmt.Errorf("code node item %d must return a single object; use runOnceForAllItems to return multiple items", index)
+	}
+	item, ok := itemFromAny(value)
+	if !ok {
+		return dataplane.Item{}, fmt.Errorf("code node item %d must return an object", index)
+	}
+	return item, nil
+}
+
 func itemFromAny(value any) (dataplane.Item, bool) {
 	switch typed := value.(type) {
 	case dataplane.Item:
 		return typed, true
 	case map[string]any:
 		if rawJSON, ok := typed["json"]; ok {
+			if !codeTopLevelKeysValid(typed) {
+				return dataplane.Item{}, false
+			}
 			jsonMap, ok := rawJSON.(map[string]any)
 			if !ok {
 				return dataplane.Item{}, false
@@ -963,11 +1561,28 @@ func itemFromAny(value any) (dataplane.Item, bool) {
 					item.Binary[key] = binary
 				}
 			}
+			if rawPaired, ok := typed["pairedItem"].(map[string]any); ok {
+				bytes, _ := json.Marshal(rawPaired)
+				var paired dataplane.PairedItem
+				_ = json.Unmarshal(bytes, &paired)
+				item.PairedItem = &paired
+			}
 			return item, true
 		}
 		return dataplane.Item{JSON: typed}, true
 	}
 	return dataplane.Item{}, false
+}
+
+func codeTopLevelKeysValid(item map[string]any) bool {
+	for key := range item {
+		switch key {
+		case "json", "binary", "pairedItem", "error", "index":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func codeInputItems(items []dataplane.Item) []map[string]any {

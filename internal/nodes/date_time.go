@@ -17,18 +17,22 @@ type DateTime struct{}
 type dateTimeParams struct {
 	Action          string
 	Value           any
+	StartDate       any
+	EndDate         any
 	OutputFieldName string
 	IncludeInput    bool
 	FormatString    string
 	GetPart         string
 	Operation       string
 	Duration        int
+	Units           []string
 	Unit            string
 	RoundTo         string
 	FromTimezone    string
 	ToTimezone      string
 	Timezone        string
 	ISO             bool
+	ISOString       bool
 }
 
 func (DateTime) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
@@ -44,8 +48,13 @@ func (DateTime) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.
 			return nil, ctx.Err()
 		default:
 		}
+		itemParams := params
 		resolvedValue := resolveValue(in, items, index, params.Value)
-		next, err := executeDateTimeItem(item, params, resolvedValue)
+		if params.Action == "between" {
+			itemParams.StartDate = resolveValue(in, items, index, params.StartDate)
+			itemParams.EndDate = resolveValue(in, items, index, params.EndDate)
+		}
+		next, err := executeDateTimeItem(item, index, itemParams, resolvedValue)
 		if err != nil {
 			return nil, fmt.Errorf("dateTime item %d: %w", index, err)
 		}
@@ -59,26 +68,83 @@ func newDateTimeParams(raw map[string]any) dateTimeParams {
 	if value, ok := raw["options"].(map[string]any); ok {
 		options = value
 	}
-	action := strings.ToLower(firstNonEmptyNode(stringParam(raw, "action"), stringParam(raw, "operation"), "format"))
-	return dateTimeParams{
-		Action:          action,
-		Value:           firstNonNilDateTime(raw["value"], raw["date"], raw["dateTime"]),
+	rawOperation := firstNonEmptyNode(stringParam(raw, "operation"), stringParam(raw, "action"), "getCurrentDate")
+	params := dateTimeParams{
+		Action:          strings.ToLower(rawOperation),
+		Value:           firstNonNilDateTime(raw["value"], raw["date"], raw["dateTime"], raw["magnitude"]),
+		StartDate:       raw["startDate"],
+		EndDate:         raw["endDate"],
 		OutputFieldName: firstNonEmptyNode(stringParam(raw, "outputFieldName", "destinationFieldName", "fieldName"), "outputDate"),
-		IncludeInput:    boolParam(raw, "includeInput", true),
-		FormatString:    stringParam(raw, "formatString", "format"),
+		IncludeInput:    boolParam(options, "includeInputFields", boolParam(raw, "includeInput", false)),
+		FormatString:    stringParam(raw, "formatString", "customFormat", "format"),
 		GetPart:         stringParam(raw, "getPart", "part"),
-		Operation:       strings.ToLower(firstNonEmptyNode(stringParam(raw, "calculationOperation"), stringParam(raw, "operation"), "add")),
+		Operation:       strings.ToLower(firstNonEmptyNode(stringParam(raw, "calculationOperation"), stringParam(raw, "mode"), stringParam(raw, "operation"), "add")),
 		Duration:        intParam(raw, "duration", 0),
-		Unit:            strings.ToLower(firstNonEmptyNode(stringParam(raw, "unit"), "day")),
-		RoundTo:         strings.ToLower(firstNonEmptyNode(stringParam(raw, "roundTo"), "day")),
+		Units:           stringList(firstNonNilDateTime(raw["units"], raw["unit"])),
+		Unit:            strings.ToLower(firstNonEmptyNode(stringParam(raw, "timeUnit"), stringParam(raw, "unit"), "day")),
+		RoundTo:         strings.ToLower(firstNonEmptyNode(stringParam(raw, "toNearest"), stringParam(raw, "to"), stringParam(raw, "roundTo"), "day")),
 		FromTimezone:    stringParam(raw, "fromTimezone"),
 		ToTimezone:      stringParam(raw, "toTimezone"),
 		Timezone:        firstNonEmptyNode(stringParam(options, "timezone"), stringParam(raw, "timezone"), "UTC"),
 		ISO:             boolParam(options, "iso", boolParam(raw, "iso", false)),
+		ISOString:       boolParam(options, "isoString", boolParam(raw, "isoString", false)),
 	}
+	switch rawOperation {
+	case "getCurrentDate":
+		params.Action = "current"
+		if boolParam(raw, "includeTime", true) {
+			params.RoundTo = ""
+		} else {
+			params.RoundTo = "day"
+		}
+	case "formatDate":
+		params.Action = "format"
+		if stringParam(raw, "format") != "custom" {
+			params.FormatString = stringParam(raw, "format")
+		}
+	case "addToDate":
+		params.Action = "calculate"
+		params.Operation = "add"
+	case "subtractFromDate":
+		params.Action = "calculate"
+		params.Operation = "subtract"
+	case "extractDate":
+		params.Action = "get"
+	case "getTimeBetweenDates":
+		params.Action = "between"
+		if params.OutputFieldName == "outputDate" {
+			params.OutputFieldName = "timeDifference"
+		}
+	case "roundDate":
+		params.Action = "round"
+		params.Operation = strings.ToLower(firstNonEmptyNode(stringParam(raw, "mode"), "roundDown"))
+	}
+	return params
 }
 
-func executeDateTimeItem(item dataplane.Item, params dateTimeParams, rawValue any) (dataplane.Item, error) {
+func executeDateTimeItem(item dataplane.Item, itemIndex int, params dateTimeParams, rawValue any) (dataplane.Item, error) {
+	result := dataplane.Item{JSON: map[string]any{}, Binary: item.Binary, PairedItem: &dataplane.PairedItem{Item: itemIndex}}
+	if params.IncludeInput {
+		result = cloneItem(item)
+		result.PairedItem = &dataplane.PairedItem{Item: itemIndex}
+	}
+	if params.Action == "current" {
+		now := time.Now()
+		parsed := now
+		var err error
+		if params.RoundTo != "" {
+			parsed, err = roundDateTime(now, params)
+			if err != nil {
+				return dataplane.Item{}, err
+			}
+		}
+		output, err := formatDateTimeValue(parsed, params)
+		if err != nil {
+			return dataplane.Item{}, err
+		}
+		result.JSON[params.OutputFieldName] = output
+		return result, nil
+	}
 	value := fmt.Sprint(rawValue)
 	if value == "" || value == "<nil>" {
 		if existing, ok := item.JSON["value"]; ok {
@@ -91,13 +157,27 @@ func executeDateTimeItem(item dataplane.Item, params dateTimeParams, rawValue an
 		value = "now"
 		params.Action = "format"
 	}
+	if params.Action == "between" {
+		startDate := fmt.Sprint(resolveSimpleDateTimeValue(item, params.StartDate))
+		endDate := fmt.Sprint(resolveSimpleDateTimeValue(item, params.EndDate))
+		start, err := parseDateTimeValue(startDate, params.Timezone)
+		if err != nil {
+			return dataplane.Item{}, fmt.Errorf("startDate: %w", err)
+		}
+		end, err := parseDateTimeValue(endDate, params.Timezone)
+		if err != nil {
+			return dataplane.Item{}, fmt.Errorf("endDate: %w", err)
+		}
+		output, err := dateTimeBetween(start, end, params)
+		if err != nil {
+			return dataplane.Item{}, err
+		}
+		result.JSON[params.OutputFieldName] = output
+		return result, nil
+	}
 	parsed, err := parseDateTimeValue(value, params.Timezone)
 	if err != nil {
 		return dataplane.Item{}, err
-	}
-	result := dataplane.Item{JSON: map[string]any{}, Binary: item.Binary, PairedItem: item.PairedItem}
-	if params.IncludeInput {
-		result = cloneItem(item)
 	}
 	var output any
 	switch params.Action {
@@ -273,6 +353,13 @@ func roundDateTime(value time.Time, params dateTimeParams) (time.Time, error) {
 		}
 	}
 	value = value.In(location)
+	if params.Operation == "roundup" {
+		next, err := addDateTimeUnit(value, params.RoundTo, 1)
+		if err != nil {
+			return value, err
+		}
+		value = next
+	}
 	switch params.RoundTo {
 	case "year":
 		return time.Date(value.Year(), 1, 1, 0, 0, 0, 0, location), nil
@@ -298,6 +385,27 @@ func roundDateTime(value time.Time, params dateTimeParams) (time.Time, error) {
 	}
 }
 
+func addDateTimeUnit(value time.Time, unit string, amount int) (time.Time, error) {
+	switch unit {
+	case "year", "years":
+		return value.AddDate(amount, 0, 0), nil
+	case "month", "months":
+		return value.AddDate(0, amount, 0), nil
+	case "week", "weeks":
+		return value.AddDate(0, 0, amount*7), nil
+	case "day", "days":
+		return value.AddDate(0, 0, amount), nil
+	case "hour", "hours":
+		return value.Add(time.Duration(amount) * time.Hour), nil
+	case "minute", "minutes":
+		return value.Add(time.Duration(amount) * time.Minute), nil
+	case "second", "seconds":
+		return value.Add(time.Duration(amount) * time.Second), nil
+	default:
+		return value, fmt.Errorf("unsupported unit %s", unit)
+	}
+}
+
 func convertDateTimeZone(value time.Time, params dateTimeParams) (string, error) {
 	if params.FromTimezone != "" {
 		location, err := time.LoadLocation(params.FromTimezone)
@@ -313,6 +421,159 @@ func convertDateTimeZone(value time.Time, params dateTimeParams) (string, error)
 	}
 	params.Timezone = target
 	return formatDateTimeValue(value.In(location), params)
+}
+
+func resolveSimpleDateTimeValue(item dataplane.Item, value any) any {
+	if value != nil {
+		return value
+	}
+	if item.JSON != nil {
+		if raw, ok := item.JSON["date"]; ok {
+			return raw
+		}
+	}
+	return ""
+}
+
+func dateTimeBetween(start time.Time, end time.Time, params dateTimeParams) (any, error) {
+	units := normalizedDateTimeUnits(params.Units)
+	parts := dateTimeDurationParts(start, end, units)
+	if params.ISOString {
+		return dateTimeDurationISO(parts), nil
+	}
+	result := map[string]any{}
+	for _, unit := range units {
+		result[dateTimeDurationKey(unit)] = parts[unit]
+	}
+	return result, nil
+}
+
+func normalizedDateTimeUnits(units []string) []string {
+	if len(units) == 0 {
+		return []string{"day"}
+	}
+	seen := map[string]bool{}
+	result := make([]string, 0, len(units))
+	for _, unit := range units {
+		unit = strings.ToLower(strings.TrimSpace(unit))
+		unit = strings.TrimSuffix(unit, "s")
+		switch unit {
+		case "year", "month", "week", "day", "hour", "minute", "second", "millisecond":
+			if !seen[unit] {
+				result = append(result, unit)
+				seen[unit] = true
+			}
+		}
+	}
+	if len(result) == 0 {
+		return []string{"day"}
+	}
+	return result
+}
+
+func dateTimeDurationParts(start time.Time, end time.Time, units []string) map[string]float64 {
+	sign := 1.0
+	if end.Before(start) {
+		start, end = end, start
+		sign = -1
+	}
+	current := start
+	parts := map[string]float64{}
+	for _, unit := range units {
+		switch unit {
+		case "year":
+			count := 0
+			for !current.AddDate(1, 0, 0).After(end) {
+				current = current.AddDate(1, 0, 0)
+				count++
+			}
+			parts[unit] = sign * float64(count)
+		case "month":
+			count := 0
+			for !current.AddDate(0, 1, 0).After(end) {
+				current = current.AddDate(0, 1, 0)
+				count++
+			}
+			parts[unit] = sign * float64(count)
+		case "week":
+			count := int(end.Sub(current) / (7 * 24 * time.Hour))
+			current = current.AddDate(0, 0, count*7)
+			parts[unit] = sign * float64(count)
+		case "day":
+			count := int(end.Sub(current) / (24 * time.Hour))
+			current = current.AddDate(0, 0, count)
+			parts[unit] = sign * float64(count)
+		case "hour":
+			count := int(end.Sub(current) / time.Hour)
+			current = current.Add(time.Duration(count) * time.Hour)
+			parts[unit] = sign * float64(count)
+		case "minute":
+			count := int(end.Sub(current) / time.Minute)
+			current = current.Add(time.Duration(count) * time.Minute)
+			parts[unit] = sign * float64(count)
+		case "second":
+			count := int(end.Sub(current) / time.Second)
+			current = current.Add(time.Duration(count) * time.Second)
+			parts[unit] = sign * float64(count)
+		case "millisecond":
+			count := float64(end.Sub(current)) / float64(time.Millisecond)
+			parts[unit] = sign * count
+		}
+	}
+	return parts
+}
+
+func dateTimeDurationKey(unit string) string {
+	switch unit {
+	case "millisecond":
+		return "milliseconds"
+	default:
+		return unit + "s"
+	}
+}
+
+func dateTimeDurationISO(parts map[string]float64) string {
+	years := int(parts["year"])
+	months := int(parts["month"])
+	weeks := int(parts["week"])
+	days := int(parts["day"])
+	hours := int(parts["hour"])
+	minutes := int(parts["minute"])
+	seconds := parts["second"] + parts["millisecond"]/1000
+	var builder strings.Builder
+	builder.WriteString("P")
+	if years != 0 {
+		builder.WriteString(fmt.Sprintf("%dY", years))
+	}
+	if months != 0 {
+		builder.WriteString(fmt.Sprintf("%dM", months))
+	}
+	if weeks != 0 {
+		builder.WriteString(fmt.Sprintf("%dW", weeks))
+	}
+	if days != 0 {
+		builder.WriteString(fmt.Sprintf("%dD", days))
+	}
+	if hours != 0 || minutes != 0 || seconds != 0 {
+		builder.WriteString("T")
+		if hours != 0 {
+			builder.WriteString(fmt.Sprintf("%dH", hours))
+		}
+		if minutes != 0 {
+			builder.WriteString(fmt.Sprintf("%dM", minutes))
+		}
+		if seconds != 0 {
+			if seconds == float64(int(seconds)) {
+				builder.WriteString(fmt.Sprintf("%dS", int(seconds)))
+			} else {
+				builder.WriteString(strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.3f", seconds), "0"), ".") + "S")
+			}
+		}
+	}
+	if builder.Len() == 1 {
+		return "PT0S"
+	}
+	return builder.String()
 }
 
 func luxonDateTimeFormatToGo(format string) string {

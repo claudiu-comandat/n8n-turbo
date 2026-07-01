@@ -23,6 +23,7 @@ type summarizeParams struct {
 	ContinueIfFieldMissing bool
 	SkipEmptySplitFields   bool
 	DisableDotNotation     bool
+	NodeVersion            float64
 }
 
 type summarizeField struct {
@@ -40,8 +41,8 @@ func (Summarize) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane
 		return nil, ctx.Err()
 	default:
 	}
-	items := cloneItems(firstInput(in.InputData))
-	params := newSummarizeParams(in.Node.Parameters)
+	items := summarizeInputItems(firstInput(in.InputData))
+	params := newSummarizeParams(in.Node.Parameters, in.Node.TypeVersion)
 	if len(params.FieldsToSummarize) == 0 {
 		return nil, fmt.Errorf("summarize: at least one field is required")
 	}
@@ -60,7 +61,7 @@ func (Summarize) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane
 	return dataplane.MainOutput(result), nil
 }
 
-func newSummarizeParams(raw map[string]any) summarizeParams {
+func newSummarizeParams(raw map[string]any, nodeVersion float64) summarizeParams {
 	options := mergeObject(raw["options"])
 	outputFormat := firstNonEmptyNode(stringParam(options, "outputFormat"), stringParam(raw, "outputFormat"), "separateItems")
 	params := summarizeParams{
@@ -72,8 +73,20 @@ func newSummarizeParams(raw map[string]any) summarizeParams {
 		ContinueIfFieldMissing: boolParam(options, "continueIfFieldMissing", boolParam(options, "continueIfFieldNotFound", boolParam(raw, "continueIfFieldMissing", false))),
 		SkipEmptySplitFields:   boolParam(options, "skipEmptySplitFields", boolParam(raw, "skipEmptySplitFields", false)),
 		DisableDotNotation:     boolParam(options, "disableDotNotation", boolParam(raw, "disableDotNotation", false)),
+		NodeVersion:            nodeVersion,
+	}
+	if nodeVersion > 1 {
+		params.ContinueIfFieldMissing = true
 	}
 	return params
+}
+
+func summarizeInputItems(input []dataplane.Item) []dataplane.Item {
+	items := cloneItems(input)
+	for index := range items {
+		items[index] = itemWithPairedIndex(items[index], index, false)
+	}
+	return items
 }
 
 func parseSummarizeFields(raw any) []summarizeField {
@@ -165,7 +178,7 @@ func executeSummarize(items []dataplane.Item, params summarizeParams) ([]datapla
 	}
 	groups, order := summarizeGroups(items, params)
 	if params.OutputSingleItem || params.OutputFormat == "singleItem" {
-		return []dataplane.Item{{JSON: summarizeGroupsAsObject(groups, order, params)}}, nil
+		return []dataplane.Item{{JSON: summarizeGroupsAsObject(groups, order, params), PairedItem: summarizePairedItem(items)}}, nil
 	}
 	result := make([]dataplane.Item, 0, len(order))
 	for _, key := range order {
@@ -534,6 +547,9 @@ func normalizeSummarizeFieldName(value string) string {
 func summarizePairedItem(items []dataplane.Item) *dataplane.PairedItem {
 	if len(items) == 0 {
 		return nil
+	}
+	if items[0].PairedItem != nil {
+		return items[0].PairedItem
 	}
 	return &dataplane.PairedItem{Item: 0}
 }

@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -39,41 +41,46 @@ const (
 )
 
 type extractParams struct {
-	operation          string
-	binaryProperty     string
-	delimiter          string
-	quoteChar          string
-	escapeChar         string
-	headerRow          bool
-	headerRowIndex     int
-	skipRows           int
-	commentChar        string
-	trimLeadingSpace   bool
-	outputFormat       string
-	convertTypes       bool
-	emptyValues        string
-	encoding           string
-	sheetName          string
-	sheetIndex         int
-	xlsxRange          string
-	dateFormat         string
-	streamThreshold    int
-	htmlOperation      string
-	selector           string
-	returnAll          bool
-	tableIndex         int
-	trimText           bool
-	linkBase           string
-	onlyInternal       bool
-	onlyWithAlt        bool
-	componentTypes     []string
-	timezone           string
-	includeMetadata    bool
-	trimWhitespace     bool
-	lineOutputField    string
-	outputFieldName    string
-	splitIntoItems     bool
-	includeInputFields bool
+	operation           string
+	binaryProperty      string
+	delimiter           string
+	quoteChar           string
+	escapeChar          string
+	headerRow           bool
+	headerRowIndex      int
+	skipRows            int
+	commentChar         string
+	trimLeadingSpace    bool
+	outputFormat        string
+	convertTypes        bool
+	emptyValues         string
+	encoding            string
+	sheetName           string
+	sheetIndex          int
+	xlsxRange           string
+	dateFormat          string
+	streamThreshold     int
+	htmlOperation       string
+	selector            string
+	returnAll           bool
+	tableIndex          int
+	trimText            bool
+	linkBase            string
+	onlyInternal        bool
+	onlyWithAlt         bool
+	componentTypes      []string
+	timezone            string
+	includeMetadata     bool
+	trimWhitespace      bool
+	lineOutputField     string
+	outputFieldName     string
+	splitIntoItems      bool
+	includeInputFields  bool
+	pdfJoinPages        bool
+	pdfMaxPages         int
+	pdfPassword         string
+	includeSourceBinary bool
+	keepOtherBinary     bool
 }
 
 func (ExtractFromFile) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
@@ -94,6 +101,7 @@ func (ExtractFromFile) Execute(ctx context.Context, in engine.ExecuteInput) (dat
 		if operation == "" || operation == "auto" {
 			operation = inferExtractOperation(binary)
 		}
+		operation = normalizeExtractOperation(operation)
 		if canUseLazyCSVExtraction(ctx, in, binary, operation, params) {
 			next, err := buildLazyCSVPlaceholder(ctx, in, item, itemIndex, binary, params)
 			if err != nil {
@@ -114,7 +122,7 @@ func (ExtractFromFile) Execute(ctx context.Context, in engine.ExecuteInput) (dat
 			return nil, err
 		}
 		for _, row := range rows {
-			result = append(result, extractedRowItem(item, itemIndex, row, params.includeInputFields))
+			result = append(result, extractedRowItem(item, itemIndex, row, params))
 		}
 	}
 	return dataplane.MainOutput(result), nil
@@ -272,18 +280,30 @@ func previewLazyCSVRows(ctx context.Context, store binarydata.Store, binary data
 		if entry == nil {
 			continue
 		}
-		rows = append(rows, extractedRowItem(sourceItem, itemIndex, entry, params.includeInputFields).JSON)
+		rows = append(rows, extractedRowItem(sourceItem, itemIndex, entry, params).JSON)
 	}
 	return rows, nil
 }
 
-func extractedRowItem(sourceItem dataplane.Item, itemIndex int, row map[string]any, includeInputFields bool) dataplane.Item {
+func extractedRowItem(sourceItem dataplane.Item, itemIndex int, row map[string]any, params extractParams) dataplane.Item {
 	next := dataplane.Item{JSON: row, PairedItem: &dataplane.PairedItem{Item: itemIndex}}
-	if !includeInputFields {
+	if !params.includeInputFields {
+		if params.includeSourceBinary {
+			next.Binary = sourceItem.Binary
+		}
 		return next
 	}
 	next = cloneItem(sourceItem)
 	next.PairedItem = &dataplane.PairedItem{Item: itemIndex}
+	if !params.includeSourceBinary && params.keepOtherBinary {
+		next.Binary = cloneBinaryMap(sourceItem.Binary)
+		delete(next.Binary, params.binaryProperty)
+		if len(next.Binary) == 0 {
+			next.Binary = nil
+		}
+	} else if !params.includeSourceBinary {
+		next.Binary = nil
+	}
 	for key, value := range row {
 		next.JSON[key] = value
 	}
@@ -291,42 +311,53 @@ func extractedRowItem(sourceItem dataplane.Item, itemIndex int, row map[string]a
 }
 
 func newExtractParams(params map[string]any) extractParams {
+	options := mergeObject(params["options"])
+	keepSource := stringParam(options, "keepSource")
+	operation := strings.TrimSpace(stringParam(params, "operation", "fileFormat"))
+	if keepSource == "" && isExtractMoveToOperation(operation) {
+		keepSource = "json"
+	}
 	parsed := extractParams{
-		operation:          strings.TrimSpace(stringParam(params, "operation", "fileFormat")),
-		binaryProperty:     stringParam(params, "binaryProperty", "binaryPropertyName", "dataPropertyName"),
-		delimiter:          stringParam(params, "delimiter"),
-		quoteChar:          stringParam(params, "quoteChar"),
-		escapeChar:         stringParam(params, "escapeChar"),
-		headerRow:          boolParam(params, "headerRow", true),
-		headerRowIndex:     intParam(params, "headerRowIndex", 0),
-		skipRows:           intParam(params, "skipRows", 0),
-		commentChar:        stringParam(params, "commentChar"),
-		trimLeadingSpace:   boolParam(params, "trimLeadingSpace", true),
-		outputFormat:       stringParam(params, "outputFormat"),
-		convertTypes:       boolParam(params, "convertTypes", true),
-		emptyValues:        stringParam(params, "emptyValues", "emptyCells"),
-		encoding:           stringParam(params, "encoding"),
-		sheetName:          stringParam(params, "sheetName"),
-		sheetIndex:         intParam(params, "sheetIndex", 0),
-		xlsxRange:          stringParam(params, "range"),
-		dateFormat:         stringParam(params, "dateFormat"),
-		streamThreshold:    intParam(params, "streamThreshold", 100*1024*1024),
-		htmlOperation:      stringParam(params, "htmlOperation", "extractOperation", "mode"),
-		selector:           stringParam(params, "selector", "cssSelector"),
-		returnAll:          boolParam(params, "returnAll", false),
-		tableIndex:         intParam(params, "tableIndex", 0),
-		trimText:           boolParam(params, "trimText", true),
-		linkBase:           stringParam(params, "linkBase", "baseURL", "baseUrl"),
-		onlyInternal:       boolParam(params, "onlyInternal", false),
-		onlyWithAlt:        boolParam(params, "onlyWithAlt", false),
-		componentTypes:     stringList(params["componentTypes"]),
-		timezone:           stringParam(params, "timezone"),
-		includeMetadata:    boolParam(params, "includeMetadata", false),
-		trimWhitespace:     boolParam(params, "trimWhitespace", false),
-		lineOutputField:    stringParam(params, "lineOutputField"),
-		outputFieldName:    stringParam(params, "outputFieldName", "destinationKey"),
-		splitIntoItems:     boolParam(params, "splitIntoItems", false) || boolParam(params, "splitIntoLines", false),
-		includeInputFields: boolParam(params, "includeInputFields", false),
+		operation:           operation,
+		binaryProperty:      stringParam(params, "binaryProperty", "binaryPropertyName", "dataPropertyName"),
+		delimiter:           firstNonEmptyNode(stringParam(params, "delimiter"), stringParam(options, "delimiter")),
+		quoteChar:           firstNonEmptyNode(stringParam(params, "quoteChar"), stringParam(options, "quoteChar")),
+		escapeChar:          firstNonEmptyNode(stringParam(params, "escapeChar"), stringParam(options, "escapeChar")),
+		headerRow:           boolParam(params, "headerRow", true),
+		headerRowIndex:      intParam(params, "headerRowIndex", 0),
+		skipRows:            intParam(params, "skipRows", 0),
+		commentChar:         firstNonEmptyNode(stringParam(params, "commentChar"), stringParam(options, "commentChar")),
+		trimLeadingSpace:    boolParam(params, "trimLeadingSpace", true),
+		outputFormat:        firstNonEmptyNode(stringParam(params, "outputFormat"), stringParam(options, "outputFormat")),
+		convertTypes:        boolParam(params, "convertTypes", true),
+		emptyValues:         stringParam(params, "emptyValues", "emptyCells"),
+		encoding:            firstNonEmptyNode(stringParam(params, "encoding"), stringParam(options, "encoding")),
+		sheetName:           stringParam(params, "sheetName"),
+		sheetIndex:          intParam(params, "sheetIndex", 0),
+		xlsxRange:           stringParam(params, "range"),
+		dateFormat:          stringParam(params, "dateFormat"),
+		streamThreshold:     intParam(params, "streamThreshold", 100*1024*1024),
+		htmlOperation:       stringParam(params, "htmlOperation", "extractOperation", "mode"),
+		selector:            stringParam(params, "selector", "cssSelector"),
+		returnAll:           boolParam(params, "returnAll", false),
+		tableIndex:          intParam(params, "tableIndex", 0),
+		trimText:            boolParam(params, "trimText", true),
+		linkBase:            stringParam(params, "linkBase", "baseURL", "baseUrl"),
+		onlyInternal:        boolParam(params, "onlyInternal", false),
+		onlyWithAlt:         boolParam(params, "onlyWithAlt", false),
+		componentTypes:      stringList(params["componentTypes"]),
+		timezone:            stringParam(params, "timezone"),
+		includeMetadata:     boolParam(params, "includeMetadata", false),
+		trimWhitespace:      boolParam(options, "trimWhitespace", boolParam(params, "trimWhitespace", false)),
+		lineOutputField:     stringParam(params, "lineOutputField"),
+		outputFieldName:     stringParam(params, "outputFieldName", "destinationKey"),
+		splitIntoItems:      boolParam(params, "splitIntoItems", false) || boolParam(params, "splitIntoLines", false),
+		includeInputFields:  boolParam(params, "includeInputFields", false) || (keepSource != "" && keepSource != "binary"),
+		pdfJoinPages:        boolParam(options, "joinPages", true),
+		pdfMaxPages:         intParam(options, "maxPages", 0),
+		pdfPassword:         stringParam(options, "password"),
+		includeSourceBinary: keepSource == "binary" || keepSource == "both",
+		keepOtherBinary:     keepSource == "json",
 	}
 	if parsed.binaryProperty == "" {
 		parsed.binaryProperty = "data"
@@ -361,6 +392,30 @@ func newExtractParams(params map[string]any) extractParams {
 	return parsed
 }
 
+func isExtractMoveToOperation(operation string) bool {
+	switch strings.ToLower(strings.TrimSpace(operation)) {
+	case "binarytopropery", "binarytoproperty", "fromjson", "text", "fromics", "xml":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeExtractOperation(operation string) string {
+	switch strings.ToLower(strings.TrimSpace(operation)) {
+	case "binarytopropery", "binarytoproperty":
+		return "binary"
+	case "xls":
+		return "xlsx"
+	case "fromics":
+		return "ical"
+	case "fromjson":
+		return "json"
+	default:
+		return operation
+	}
+}
+
 func inferExtractOperation(binary dataplane.Binary) string {
 	value := strings.ToLower(firstNonEmptyNode(binary.FileExtension, binary.FileType, binary.MimeType, binary.FileName))
 	switch {
@@ -391,8 +446,16 @@ func extractBinaryData(ctx context.Context, data []byte, operation string, param
 		return extractODSData(data, params)
 	case "ical", "ics":
 		return extractICalData(data, params)
+	case "json":
+		return extractJSONData(data, params)
+	case "pdf":
+		return extractPDFData(ctx, data, params)
 	case "text", "txt":
 		return extractTextData(data, params)
+	case "rtf":
+		return extractRTFData(data, params), nil
+	case "xml":
+		return extractXMLData(data, params)
 	case "html", "htm":
 		return extractHTMLData(data, params)
 	case "binary":
@@ -400,6 +463,134 @@ func extractBinaryData(ctx context.Context, data []byte, operation string, param
 	default:
 		return nil, fmt.Errorf("extractFromFile: unsupported operation %s", operation)
 	}
+}
+
+func extractXMLData(data []byte, params extractParams) ([]map[string]any, error) {
+	converted, err := xmlToJSON(string(data), xmlNodeOptions{
+		TextNodeKey:   "_",
+		ParseNumbers:  true,
+		ParseBooleans: true,
+		ExplicitRoot:  true,
+		MergeAttrs:    true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("xml: parse data: %w", err)
+	}
+	return []map[string]any{{params.outputFieldName: converted}}, nil
+}
+
+func extractRTFData(data []byte, params extractParams) []map[string]any {
+	return []map[string]any{{params.outputFieldName: rtfPlainText(string(data))}}
+}
+
+func rtfPlainText(raw string) string {
+	var builder strings.Builder
+	depth := 0
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		case '\\':
+			i = skipRTFControl(raw, i+1, &builder)
+		default:
+			if depth >= 0 {
+				builder.WriteByte(raw[i])
+			}
+		}
+	}
+	return strings.Join(strings.Fields(builder.String()), " ")
+}
+
+func skipRTFControl(raw string, index int, builder *strings.Builder) int {
+	if index >= len(raw) {
+		return index
+	}
+	switch raw[index] {
+	case '\\', '{', '}':
+		builder.WriteByte(raw[index])
+		return index
+	case '\'':
+		if index+2 < len(raw) {
+			if value, err := strconv.ParseUint(raw[index+1:index+3], 16, 8); err == nil {
+				builder.WriteByte(byte(value))
+			}
+			return index + 2
+		}
+		return index
+	case '~':
+		builder.WriteByte(' ')
+		return index
+	case 'n':
+		return index
+	}
+	for index < len(raw) && ((raw[index] >= 'a' && raw[index] <= 'z') || (raw[index] >= 'A' && raw[index] <= 'Z')) {
+		index++
+	}
+	if index < len(raw) && raw[index] == '-' {
+		index++
+	}
+	for index < len(raw) && raw[index] >= '0' && raw[index] <= '9' {
+		index++
+	}
+	if index < len(raw) && raw[index] == ' ' {
+		return index
+	}
+	return index - 1
+}
+
+func extractJSONData(data []byte, params extractParams) ([]map[string]any, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return []map[string]any{{params.outputFieldName: map[string]any{}}}, nil
+	}
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, fmt.Errorf("json: parse data: %w", err)
+	}
+	return []map[string]any{{params.outputFieldName: value}}, nil
+}
+
+func extractPDFData(ctx context.Context, data []byte, params extractParams) ([]map[string]any, error) {
+	file, err := os.CreateTemp("", "n8n-turbo-*.pdf")
+	if err != nil {
+		return nil, fmt.Errorf("pdf: create temp file: %w", err)
+	}
+	path := file.Name()
+	defer os.Remove(path)
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("pdf: write temp file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return nil, fmt.Errorf("pdf: close temp file: %w", err)
+	}
+	args := []string{"-layout"}
+	if params.pdfJoinPages {
+		args = append(args, "-nopgbrk")
+	}
+	if params.pdfMaxPages > 0 {
+		args = append(args, "-f", "1", "-l", fmt.Sprint(params.pdfMaxPages))
+	}
+	if params.pdfPassword != "" {
+		args = append(args, "-opw", params.pdfPassword, "-upw", params.pdfPassword)
+	}
+	args = append(args, path, "-")
+	output, err := exec.CommandContext(ctx, "pdftotext", args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("pdf: extract text: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	text := strings.TrimRight(string(output), "\x00")
+	if params.pdfJoinPages {
+		return []map[string]any{{"text": strings.TrimRight(text, "\f\r\n")}}, nil
+	}
+	pages := strings.Split(strings.TrimRight(text, "\f\r\n"), "\f")
+	for index := range pages {
+		pages[index] = strings.TrimRight(pages[index], "\r\n")
+	}
+	return []map[string]any{{"text": pages}}, nil
 }
 
 func extractCSVData(data []byte, params extractParams) ([]map[string]any, error) {

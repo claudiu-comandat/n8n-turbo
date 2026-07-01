@@ -29,10 +29,14 @@ type xmlNodeOptions struct {
 	CDATAKey           string
 	PreserveNamespaces bool
 	IgnoreNamespaces   bool
+	IgnoreAttrs        bool
+	MergeAttrs         bool
+	NormalizeTags      bool
+	Trim               bool
 }
 
 func executeXMLNode(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
-	operation := strings.ToLower(firstNonEmptyNode(stringParam(in.Node.Parameters, "operation"), "toJson"))
+	operation := normalizeXMLOperation(firstNonEmptyNode(stringParam(in.Node.Parameters, "mode"), stringParam(in.Node.Parameters, "operation"), "xmlToJson"))
 	property := firstNonEmptyNode(stringParam(in.Node.Parameters, "dataPropertyName", "dataProperty", "fieldName"), "data")
 	options := newXMLNodeOptions(in.Node.Parameters)
 	items := firstInput(in.InputData)
@@ -43,53 +47,73 @@ func executeXMLNode(ctx context.Context, in engine.ExecuteInput) (dataplane.Outp
 			return nil, ctx.Err()
 		default:
 		}
-		next := cloneItem(item)
-		value, ok := item.JSON[property]
-		if !ok {
-			return nil, fmt.Errorf("xml item %d: field %s not found", index, property)
-		}
 		switch operation {
-		case "tojson":
+		case "xmlToJson":
+			value, ok := item.JSON[property]
+			if !ok {
+				return nil, fmt.Errorf("xml item %d: field %s not found", index, property)
+			}
 			converted, err := xmlToJSON(fmt.Sprint(value), options)
 			if err != nil {
-				return nil, fmt.Errorf("xml toJson item %d: %w", index, err)
+				return nil, fmt.Errorf("xml xmlToJson item %d: %w", index, err)
 			}
-			next.JSON[property] = converted
-		case "fromjson":
-			converted, err := jsonToXML(value, options)
+			output = append(output, dataplane.Item{JSON: converted})
+		case "jsonToxml":
+			converted, err := jsonToXML(item.JSON, options)
 			if err != nil {
-				return nil, fmt.Errorf("xml fromJson item %d: %w", index, err)
+				return nil, fmt.Errorf("xml jsonToxml item %d: %w", index, err)
 			}
-			next.JSON[property] = converted
+			output = append(output, dataplane.Item{JSON: map[string]any{property: converted}, PairedItem: &dataplane.PairedItem{Item: index}})
 		case "validate":
+			next := cloneItem(item)
+			value, ok := item.JSON[property]
+			if !ok {
+				return nil, fmt.Errorf("xml item %d: field %s not found", index, property)
+			}
 			valid, errors := validateXMLString(fmt.Sprint(value))
 			next.JSON["isValid"] = valid
 			next.JSON["errors"] = errors
+			output = append(output, next)
 		default:
 			return nil, fmt.Errorf("xml: unsupported operation %s", operation)
 		}
-		output = append(output, next)
 	}
 	return dataplane.MainOutput(output), nil
 }
 
+func normalizeXMLOperation(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "xmltojson", "tojson":
+		return "xmlToJson"
+	case "jsontoxml", "fromjson":
+		return "jsonToxml"
+	default:
+		return value
+	}
+}
+
 func newXMLNodeOptions(params map[string]any) xmlNodeOptions {
 	options := xmlOptionsMap(params)
+	headless := boolParam(options, "headless", false)
 	return xmlNodeOptions{
-		AttributePrefix:    firstNonEmptyNode(stringParam(options, "attributePrefix"), stringParam(params, "attributePrefix"), "@"),
-		TextNodeKey:        firstNonEmptyNode(stringParam(options, "textNodeKey"), stringParam(params, "textNodeKey"), "#text"),
-		ForceArray:         boolParam(options, "forceArray", boolParam(params, "forceArray", false)),
+		AttributePrefix:    firstNonEmptyNode(stringParam(options, "attributePrefix"), stringParam(options, "attrkey"), stringParam(params, "attributePrefix"), ""),
+		TextNodeKey:        firstNonEmptyNode(stringParam(options, "textNodeKey"), stringParam(options, "charkey"), stringParam(params, "textNodeKey"), "_"),
+		ForceArray:         boolParam(options, "forceArray", boolParam(options, "explicitArray", boolParam(params, "forceArray", false))),
 		ParseNumbers:       boolParam(options, "parseNumbers", boolParam(params, "parseNumbers", false)),
 		ParseBooleans:      boolParam(options, "parseBooleans", boolParam(params, "parseBooleans", false)),
 		ExplicitRoot:       boolParam(options, "explicitRoot", boolParam(params, "explicitRoot", true)),
 		RootName:           firstNonEmptyNode(stringParam(options, "rootName"), stringParam(params, "rootName"), "root"),
-		XMLDeclaration:     boolParam(options, "xmlDeclaration", boolParam(params, "xmlDeclaration", false)),
+		XMLDeclaration:     boolParam(options, "xmlDeclaration", boolParam(params, "xmlDeclaration", !headless)),
 		XMLVersion:         firstNonEmptyNode(stringParam(options, "xmlVersion"), stringParam(params, "xmlVersion"), "1.0"),
 		XMLEncoding:        firstNonEmptyNode(stringParam(options, "xmlEncoding"), stringParam(params, "xmlEncoding"), "UTF-8"),
-		AttributeChar:      firstNonEmptyNode(stringParam(options, "attributeChar"), stringParam(params, "attributeChar"), "@"),
+		AttributeChar:      firstNonEmptyNode(stringParam(options, "attributeChar"), stringParam(options, "attrkey"), stringParam(params, "attributeChar"), "$"),
 		CDATAKey:           firstNonEmptyNode(stringParam(options, "cdataKey"), stringParam(params, "cdataKey"), "#cdata"),
 		PreserveNamespaces: boolParam(options, "preserveNamespaces", boolParam(params, "preserveNamespaces", false)),
 		IgnoreNamespaces:   boolParam(options, "ignoreNamespaces", boolParam(params, "ignoreNamespaces", false)),
+		IgnoreAttrs:        boolParam(options, "ignoreAttrs", false),
+		MergeAttrs:         boolParam(options, "mergeAttrs", true),
+		NormalizeTags:      boolParam(options, "normalizeTags", false),
+		Trim:               boolParam(options, "trim", boolParam(options, "normalize", false)),
 	}
 }
 
@@ -131,8 +155,18 @@ func xmlToJSON(raw string, options xmlNodeOptions) (map[string]any, error) {
 
 func parseXMLNodeElement(decoder *xml.Decoder, start xml.StartElement, options xmlNodeOptions) (any, error) {
 	result := map[string]any{}
-	for _, attr := range start.Attr {
-		result[options.AttributePrefix+xmlName(attr.Name, options)] = convertXMLTextValue(attr.Value, options)
+	if !options.IgnoreAttrs {
+		for _, attr := range start.Attr {
+			name := xmlName(attr.Name, options)
+			if options.NormalizeTags {
+				name = strings.ToLower(name)
+			}
+			if options.MergeAttrs {
+				result[name] = convertXMLTextValue(attr.Value, options)
+			} else {
+				result[options.AttributePrefix+name] = convertXMLTextValue(attr.Value, options)
+			}
+		}
 	}
 	var text strings.Builder
 	for {
@@ -143,6 +177,9 @@ func parseXMLNodeElement(decoder *xml.Decoder, start xml.StartElement, options x
 		switch typed := token.(type) {
 		case xml.StartElement:
 			childName := xmlElementName(typed.Name, options)
+			if options.NormalizeTags {
+				childName = strings.ToLower(childName)
+			}
 			childValue, err := parseXMLNodeElement(decoder, typed, options)
 			if err != nil {
 				return nil, err
@@ -151,7 +188,10 @@ func parseXMLNodeElement(decoder *xml.Decoder, start xml.StartElement, options x
 		case xml.CharData:
 			text.Write([]byte(typed))
 		case xml.EndElement:
-			content := strings.TrimSpace(text.String())
+			content := text.String()
+			if options.Trim {
+				content = strings.TrimSpace(content)
+			}
 			if len(result) == 0 {
 				return convertXMLTextValue(content, options), nil
 			}

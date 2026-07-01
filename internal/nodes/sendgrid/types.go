@@ -41,6 +41,7 @@ type SendEmailRequest struct {
 	Personalizations []Personalization `json:"personalizations"`
 	From             EmailAddress      `json:"from"`
 	ReplyTo          *EmailAddress     `json:"reply_to,omitempty"`
+	ReplyToList      []EmailAddress    `json:"reply_to_list,omitempty"`
 	Subject          string            `json:"subject,omitempty"`
 	Content          []Content         `json:"content,omitempty"`
 	Attachments      []Attachment      `json:"attachments,omitempty"`
@@ -52,6 +53,7 @@ type SendEmailRequest struct {
 	BatchID          string            `json:"batch_id,omitempty"`
 	IPPoolName       string            `json:"ip_pool_name,omitempty"`
 	TrackingSettings map[string]any    `json:"tracking_settings,omitempty"`
+	MailSettings     map[string]any    `json:"mail_settings,omitempty"`
 }
 
 type Contact struct {
@@ -67,6 +69,7 @@ type Contact struct {
 	PhoneNumber      string            `json:"phone_number,omitempty"`
 	UniqueExternalID string            `json:"unique_name,omitempty"`
 	CustomFields     map[string]string `json:"custom_fields,omitempty"`
+	AlternateEmails  []string          `json:"alternate_emails,omitempty"`
 }
 
 type Error struct {

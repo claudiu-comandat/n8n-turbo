@@ -14,6 +14,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha3"
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/asn1"
@@ -23,8 +24,10 @@ import (
 	"fmt"
 	"hash"
 	"math/big"
+	"regexp"
 	"strings"
 
+	"github.com/n8n-io/n8n-turbo/internal/binarydata"
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 	"github.com/n8n-io/n8n-turbo/internal/engine"
 )
@@ -48,6 +51,10 @@ type cryptoConfig struct {
 	AESAlgorithm      string
 	AESIV             any
 	OutputField       string
+	BinaryData        bool
+	BinaryProperty    string
+	EncodingType      string
+	StringLength      int
 }
 
 type ecdsaSignature struct {
@@ -72,6 +79,9 @@ func (Crypto) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Ou
 		if err != nil {
 			return nil, fmt.Errorf("crypto item %d: %w", index, err)
 		}
+		if next.PairedItem == nil {
+			next.PairedItem = &dataplane.PairedItem{Item: index}
+		}
 		result = append(result, next)
 	}
 	return dataplane.MainOutput(result), nil
@@ -86,7 +96,7 @@ func cryptoParams(params map[string]any) cryptoConfig {
 		Action:            firstNonEmptyNode(stringParam(params, "action", "operation"), "hash"),
 		Value:             firstNonNil(params["value"], params["text"], params["data"]),
 		Encoding:          firstNonEmptyNode(stringParam(params, "encoding"), "hex"),
-		Algorithm:         strings.ToUpper(firstNonEmptyNode(stringParam(params, "algorithm"), "SHA256")),
+		Algorithm:         strings.ToUpper(firstNonEmptyNode(stringParam(params, "algorithm", "type"), "SHA256")),
 		SecretKey:         firstNonNil(params["secretKey"], params["key"], params["secret"]),
 		PrivateKey:        params["privateKey"],
 		PublicKey:         params["publicKey"],
@@ -98,12 +108,18 @@ func cryptoParams(params map[string]any) cryptoConfig {
 		AESKey:            firstNonNil(params["aesKey"], params["key"]),
 		AESAlgorithm:      strings.ToLower(firstNonEmptyNode(stringParam(params, "aesAlgorithm", "algorithm"), "aes-256-gcm")),
 		AESIV:             firstNonNil(params["aesIv"], params["aesIV"], params["iv"]),
-		OutputField:       outputField,
+		OutputField:       firstNonEmptyNode(stringParam(params, "dataPropertyName"), outputField),
+		BinaryData:        boolParam(params, "binaryData", false),
+		BinaryProperty:    firstNonEmptyNode(stringParam(params, "binaryPropertyName"), "data"),
+		EncodingType:      firstNonEmptyNode(stringParam(params, "encodingType"), "uuid"),
+		StringLength:      intParam(params, "stringLength", 32),
 	}
 }
 
 func executeCryptoItem(in engine.ExecuteInput, params cryptoConfig, items []dataplane.Item, item dataplane.Item, index int) (dataplane.Item, error) {
 	switch strings.ToLower(params.Action) {
+	case "generate":
+		return cryptoGenerate(item, params, index)
 	case "hash":
 		return cryptoHash(in, params, items, item, index)
 	case "hmac":
@@ -124,31 +140,51 @@ func executeCryptoItem(in engine.ExecuteInput, params cryptoConfig, items []data
 }
 
 func cryptoHash(in engine.ExecuteInput, params cryptoConfig, items []dataplane.Item, item dataplane.Item, index int) (dataplane.Item, error) {
-	value := cryptoValue(in, params, items, item, index)
+	value, err := cryptoInputBytes(in, params, items, item, index)
+	if err != nil {
+		return dataplane.Item{}, err
+	}
 	hashFunc, err := cryptoHashFunc(params.Algorithm)
 	if err != nil {
 		return dataplane.Item{}, err
 	}
 	h := hashFunc()
-	_, _ = h.Write([]byte(value))
-	return cryptoOutput(item, params.OutputField, encodeCryptoBytes(h.Sum(nil), params.Encoding)), nil
+	_, _ = h.Write(value)
+	next := cryptoOutput(item, params.OutputField, encodeCryptoBytes(h.Sum(nil), params.Encoding))
+	if params.BinaryData {
+		next.Binary = nil
+	}
+	return next, nil
 }
 
 func cryptoHMAC(in engine.ExecuteInput, params cryptoConfig, items []dataplane.Item, item dataplane.Item, index int) (dataplane.Item, error) {
-	value := cryptoValue(in, params, items, item, index)
+	value, err := cryptoInputBytes(in, params, items, item, index)
+	if err != nil {
+		return dataplane.Item{}, err
+	}
 	secret := fmt.Sprint(resolveValue(in, items, index, params.SecretKey))
+	if secret == "" || secret == "<nil>" {
+		secret = stringParam(in.Credentials["crypto"], "hmacSecret")
+	}
 	hashFunc, err := cryptoHashFunc(params.Algorithm)
 	if err != nil {
 		return dataplane.Item{}, err
 	}
 	mac := hmac.New(hashFunc, []byte(secret))
-	_, _ = mac.Write([]byte(value))
-	return cryptoOutput(item, params.OutputField, encodeCryptoBytes(mac.Sum(nil), params.Encoding)), nil
+	_, _ = mac.Write(value)
+	next := cryptoOutput(item, params.OutputField, encodeCryptoBytes(mac.Sum(nil), params.Encoding))
+	if params.BinaryData {
+		next.Binary = nil
+	}
+	return next, nil
 }
 
 func cryptoSign(in engine.ExecuteInput, params cryptoConfig, items []dataplane.Item, item dataplane.Item, index int) (dataplane.Item, error) {
 	value := cryptoValue(in, params, items, item, index)
 	privateKey := fmt.Sprint(resolveValue(in, items, index, params.PrivateKey))
+	if privateKey == "" || privateKey == "<nil>" {
+		privateKey = stringParam(in.Credentials["crypto"], "signPrivateKey")
+	}
 	key, err := parsePrivateKey(privateKey)
 	if err != nil {
 		return dataplane.Item{}, err
@@ -344,10 +380,85 @@ func cryptoValue(in engine.ExecuteInput, params cryptoConfig, items []dataplane.
 	return ""
 }
 
+func cryptoInputBytes(in engine.ExecuteInput, params cryptoConfig, items []dataplane.Item, item dataplane.Item, index int) ([]byte, error) {
+	if params.BinaryData {
+		binary, ok := item.Binary[params.BinaryProperty]
+		if !ok {
+			return nil, fmt.Errorf("binary property %s not found", params.BinaryProperty)
+		}
+		return binarydata.Read(context.Background(), in.BinaryStore, binary)
+	}
+	return []byte(cryptoValue(in, params, items, item, index)), nil
+}
+
 func cryptoOutput(item dataplane.Item, field string, value any) dataplane.Item {
 	next := cloneItem(item)
-	next.JSON[field] = value
+	setNestedSetValue(next.JSON, field, value)
 	return next
+}
+
+func cryptoGenerate(item dataplane.Item, params cryptoConfig, index int) (dataplane.Item, error) {
+	var value string
+	switch strings.ToLower(params.EncodingType) {
+	case "uuid":
+		generated, err := cryptoUUIDV4()
+		if err != nil {
+			return dataplane.Item{}, err
+		}
+		value = generated
+	case "base64":
+		raw, err := cryptoRandomBytes(params.StringLength)
+		if err != nil {
+			return dataplane.Item{}, err
+		}
+		value = regexp.MustCompile(`\W`).ReplaceAllString(base64.StdEncoding.EncodeToString(raw), "")
+		if len(value) > params.StringLength {
+			value = value[:params.StringLength]
+		}
+	case "hex":
+		raw, err := cryptoRandomBytes(params.StringLength)
+		if err != nil {
+			return dataplane.Item{}, err
+		}
+		value = hex.EncodeToString(raw)
+		if len(value) > params.StringLength {
+			value = value[:params.StringLength]
+		}
+	case "ascii":
+		raw, err := cryptoRandomBytes(params.StringLength)
+		if err != nil {
+			return dataplane.Item{}, err
+		}
+		builder := strings.Builder{}
+		for _, b := range raw {
+			builder.WriteByte(33 + (b % 94))
+		}
+		value = builder.String()
+	default:
+		return dataplane.Item{}, fmt.Errorf("unsupported generate encoding %s", params.EncodingType)
+	}
+	next := cryptoOutput(item, params.OutputField, value)
+	next.PairedItem = &dataplane.PairedItem{Item: index}
+	return next, nil
+}
+
+func cryptoRandomBytes(length int) ([]byte, error) {
+	if length <= 0 {
+		length = 32
+	}
+	raw := make([]byte, length)
+	_, err := rand.Read(raw)
+	return raw, err
+}
+
+func cryptoUUIDV4() (string, error) {
+	raw, err := cryptoRandomBytes(16)
+	if err != nil {
+		return "", err
+	}
+	raw[6] = (raw[6] & 0x0f) | 0x40
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16]), nil
 }
 
 func cryptoHashFunc(algorithm string) (func() hash.Hash, error) {
@@ -364,6 +475,12 @@ func cryptoHashFunc(algorithm string) (func() hash.Hash, error) {
 		return sha512.New384, nil
 	case "SHA512":
 		return sha512.New, nil
+	case "SHA3256":
+		return func() hash.Hash { return sha3.New256() }, nil
+	case "SHA3384":
+		return func() hash.Hash { return sha3.New384() }, nil
+	case "SHA3512":
+		return func() hash.Hash { return sha3.New512() }, nil
 	default:
 		return nil, fmt.Errorf("unsupported hash algorithm %s", algorithm)
 	}

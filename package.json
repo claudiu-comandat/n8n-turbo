@@ -1,0 +1,26 @@
+{
+  "name": "n8n-turbo",
+  "version": "1.0.0",
+  "description": "Standalone Go runtime for an n8n-compatible automation server.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/claudiu-comandat/n8n-turbo.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/claudiu-comandat/n8n-turbo/issues"
+  },
+  "homepage": "https://github.com/claudiu-comandat/n8n-turbo#readme",
+  "dependencies": {
+    "playwright": "^1.61.1",
+    "playwright-extra": "^4.3.6"
+  },
+  "devDependencies": {}
+}

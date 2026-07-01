@@ -92,3 +92,11 @@ func formAddInt(values url.Values, key string, value int) {
 		values.Set(key, fmt.Sprint(value))
 	}
 }
+
+func nestedStringParam(params map[string]any, parent string, keys ...string) string {
+	object, ok := params[parent].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return stringValue(object, keys...)
+}

@@ -1,6 +1,9 @@
 package metadata
 
+import "encoding/json"
+
 type NodeType struct {
+	Raw                     map[string]any    `json:"-"`
 	Name                    string            `json:"name"`
 	DisplayName             string            `json:"displayName"`
 	Description             string            `json:"description"`
@@ -9,8 +12,9 @@ type NodeType struct {
 	Subtitle                string            `json:"subtitle,omitempty"`
 	Defaults                NodeDefaults      `json:"defaults"`
 	Properties              []Property        `json:"properties"`
-	Inputs                  []string          `json:"inputs"`
-	Outputs                 []string          `json:"outputs"`
+	Inputs                  any               `json:"inputs"`
+	Outputs                 any               `json:"outputs"`
+	OutputNames             []string          `json:"outputNames,omitempty"`
 	Credentials             []CredentialUsage `json:"credentials,omitempty"`
 	Webhooks                []Webhook         `json:"webhooks,omitempty"`
 	Icon                    string            `json:"icon,omitempty"`
@@ -25,7 +29,17 @@ type NodeType struct {
 	EventTriggerDescription string            `json:"eventTriggerDescription,omitempty"`
 	TriggerPanel            map[string]any    `json:"triggerPanel,omitempty"`
 	RequestDefaults         map[string]any    `json:"requestDefaults,omitempty"`
+	BuilderHint             map[string]any    `json:"builderHint,omitempty"`
+	Hints                   []map[string]any  `json:"hints,omitempty"`
 	Codex                   *NodeCodex        `json:"codex,omitempty"`
+}
+
+func (node NodeType) MarshalJSON() ([]byte, error) {
+	if node.Raw != nil {
+		return json.Marshal(node.Raw)
+	}
+	type nodeTypeAlias NodeType
+	return json.Marshal(nodeTypeAlias(node))
 }
 
 type Webhook struct {
@@ -66,11 +80,13 @@ type Property struct {
 	Placeholder      string            `json:"placeholder,omitempty"`
 	Options          any               `json:"options,omitempty"`
 	DisplayOptions   map[string]any    `json:"displayOptions,omitempty"`
+	DisabledOptions  map[string]any    `json:"disabledOptions,omitempty"`
 	Routing          map[string]any    `json:"routing,omitempty"`
 	NoDataExpression bool              `json:"noDataExpression,omitempty"`
 	ExtractValue     map[string]any    `json:"extractValue,omitempty"`
 	Modes            []ParameterMode   `json:"modes,omitempty"`
 	Documentation    map[string]string `json:"documentation,omitempty"`
+	BuilderHint      map[string]any    `json:"builderHint,omitempty"`
 }
 
 type ParameterMode struct {

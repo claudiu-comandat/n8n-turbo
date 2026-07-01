@@ -11,6 +11,9 @@ import (
 type ExecuteWorkflow struct{}
 
 func (ExecuteWorkflow) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
+	if operation := firstNonEmptyNode(stringParam(in.Node.Parameters, "operation"), "call_workflow"); operation != "call_workflow" {
+		return nil, fmt.Errorf("executeWorkflow: unsupported operation %s", operation)
+	}
 	if in.SubWorkflow == nil {
 		return nil, fmt.Errorf("sub-workflow execution is not available")
 	}
@@ -49,6 +52,7 @@ func executeWorkflowOnce(ctx context.Context, in engine.ExecuteInput, items []da
 	if len(result.Data) == 0 {
 		return dataplane.EmptyOutput(), nil
 	}
+	applyExecuteWorkflowPairedItems(result.Data, len(items), itemIndex)
 	return result.Data, nil
 }
 
@@ -117,6 +121,22 @@ func appendCallStack(stack []string, workflowID string) []string {
 		result = append(result, workflowID)
 	}
 	return result
+}
+
+func applyExecuteWorkflowPairedItems(output dataplane.Output, inputLength int, fallbackIndex int) {
+	for outputIndex := range output {
+		sameLength := len(output[outputIndex]) == inputLength
+		for itemIndex := range output[outputIndex] {
+			if output[outputIndex][itemIndex].PairedItem != nil {
+				continue
+			}
+			sourceIndex := fallbackIndex
+			if sameLength {
+				sourceIndex = itemIndex
+			}
+			output[outputIndex][itemIndex].PairedItem = &dataplane.PairedItem{Item: sourceIndex}
+		}
+	}
 }
 
 func cloneItems(items []dataplane.Item) []dataplane.Item {

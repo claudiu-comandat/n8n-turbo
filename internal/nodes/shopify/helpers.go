@@ -12,7 +12,7 @@ import (
 func stringValue(params map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := params[key]; ok {
-			text := strings.TrimSpace(fmt.Sprint(value))
+			text := strings.TrimSpace(textValue(value))
 			if text != "" && text != "<nil>" {
 				return text
 			}
@@ -21,12 +21,24 @@ func stringValue(params map[string]any, keys ...string) string {
 	return ""
 }
 
+func textValue(value any) string {
+	if object, ok := value.(map[string]any); ok {
+		if raw, ok := object["value"]; ok {
+			return textValue(raw)
+		}
+	}
+	return fmt.Sprint(value)
+}
+
 func stringParam(params map[string]any, keys ...string) string {
 	return stringValue(params, keys...)
 }
 
 func intParam(params map[string]any, key string) int {
 	if value, ok := params[key]; ok {
+		if object, ok := value.(map[string]any); ok {
+			return intParam(object, "value")
+		}
 		switch typed := value.(type) {
 		case int:
 			return typed
@@ -47,6 +59,9 @@ func intParam(params map[string]any, key string) int {
 
 func int64Param(params map[string]any, key string) int64 {
 	if value, ok := params[key]; ok {
+		if object, ok := value.(map[string]any); ok {
+			return int64Param(object, "value")
+		}
 		switch typed := value.(type) {
 		case int:
 			return int64(typed)
@@ -60,6 +75,15 @@ func int64Param(params map[string]any, key string) int64 {
 		case string:
 			parsed, _ := strconv.ParseInt(typed, 10, 64)
 			return parsed
+		}
+	}
+	return 0
+}
+
+func firstInt64(params map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		if value := int64Param(params, key); value != 0 {
+			return value
 		}
 	}
 	return 0
@@ -89,7 +113,7 @@ func stringSlice(params map[string]any, key string) []string {
 	case []any:
 		out := []string{}
 		for _, item := range typed {
-			text := strings.TrimSpace(fmt.Sprint(item))
+			text := strings.TrimSpace(textValue(item))
 			if text != "" {
 				out = append(out, text)
 			}

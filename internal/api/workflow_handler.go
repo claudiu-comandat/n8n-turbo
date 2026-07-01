@@ -22,11 +22,13 @@ import (
 
 type workflowRunRequest struct {
 	DestinationNode json.RawMessage             `json:"destinationNode"`
+	TriggerToStart  json.RawMessage             `json:"triggerToStartFrom"`
 	WorkflowData    *dataplane.Workflow         `json:"workflowData,omitempty"`
 	PinData         map[string][]dataplane.Item `json:"pinData,omitempty"`
 	RunData         dataplane.RunData           `json:"runData,omitempty"`
 	StartNodes      []workflowStartNode         `json:"startNodes,omitempty"`
 	DirtyNodeNames  []string                    `json:"dirtyNodeNames,omitempty"`
+	PushRef         string                      `json:"pushRef,omitempty"`
 }
 
 type workflowStartNode struct {
@@ -375,10 +377,15 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pinData := request.effectivePinData(workflow)
+	pushRef := request.pushRef(r)
 	onNodeAfter := s.pushNodeAfter
-	if pushRef := strings.TrimSpace(r.Header.Get("push-ref")); pushRef != "" {
+	onFinished := s.pushExecutionFinished
+	if pushRef != "" {
 		onNodeAfter = func(event engine.NodeAfterEvent) {
 			s.pushNodeAfterToSession(pushRef, event)
+		}
+		onFinished = func(event engine.ExecutionFinishedEvent) {
+			s.pushExecutionFinishedToSession(pushRef, event)
 		}
 	}
 	dispatchResult := s.dispatchWorkflowSync(r.Context(), executionDispatchRequest{
@@ -391,15 +398,17 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 			Secrets:     secrets,
 			BinaryStore: s.binaryStore,
 			Credentials: s.resolveNodeCredentials,
+			TriggerNode: request.triggerNodeName(),
 			StartNodes:  request.startNodeNames(),
 			RunData:     request.RunData,
 			PinData:     pinData,
 			OnStarted:   s.pushExecutionStarted,
 			OnNodeAfter: onNodeAfter,
-			OnFinished:  s.pushExecutionFinished,
+			OnFinished:  onFinished,
 		},
 		StartData: request.startData(destination),
 		PinData:   pinData,
+		PushRef:   pushRef,
 		ErrorName: "WorkflowExecutionError",
 	})
 	if dispatchResult.StartErr != nil {
@@ -567,10 +576,15 @@ func (s *Server) handleRetryExecution(w http.ResponseWriter, r *http.Request) {
 	}
 	variables, _ := s.resolvedVariables(r)
 	secrets, _ := s.resolvedSecretsRequest(r)
+	pushRef := requestPushRef(r, "")
 	onNodeAfter := s.pushNodeAfter
-	if pushRef := strings.TrimSpace(r.Header.Get("push-ref")); pushRef != "" {
+	onFinished := s.pushExecutionFinished
+	if pushRef != "" {
 		onNodeAfter = func(event engine.NodeAfterEvent) {
 			s.pushNodeAfterToSession(pushRef, event)
+		}
+		onFinished = func(event engine.ExecutionFinishedEvent) {
+			s.pushExecutionFinishedToSession(pushRef, event)
 		}
 	}
 	dispatchResult := s.dispatchWorkflowSync(r.Context(), executionDispatchRequest{
@@ -584,9 +598,10 @@ func (s *Server) handleRetryExecution(w http.ResponseWriter, r *http.Request) {
 			Credentials: s.resolveNodeCredentials,
 			OnStarted:   s.pushExecutionStarted,
 			OnNodeAfter: onNodeAfter,
-			OnFinished:  s.pushExecutionFinished,
+			OnFinished:  onFinished,
 		},
 		StartData: map[string]any{"retryOf": previous.ID},
+		PushRef:   pushRef,
 		ErrorName: "RetryExecutionError",
 	})
 	if dispatchResult.StartErr != nil {
@@ -649,6 +664,7 @@ func workflowFromRow(row *persistence.WorkflowRow) (dataplane.Workflow, error) {
 	_ = json.Unmarshal(row.StaticData, &workflow.StaticData)
 	_ = json.Unmarshal(row.PinData, &workflow.PinData)
 	_ = json.Unmarshal(row.Meta, &workflow.Meta)
+	workflow.PreserveFields("settings", "pinData", "meta")
 	normalizeWorkflowDefaults(&workflow)
 	return workflow, nil
 }
@@ -1138,6 +1154,20 @@ func decodeWorkflowRunRequest(r *http.Request) (workflowRunRequest, error) {
 	return request, nil
 }
 
+func (r workflowRunRequest) pushRef(request *http.Request) string {
+	return requestPushRef(request, r.PushRef)
+}
+
+func requestPushRef(r *http.Request, bodyValue string) string {
+	if value := strings.TrimSpace(bodyValue); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(r.Header.Get("push-ref")); value != "" {
+		return value
+	}
+	return strings.TrimSpace(r.URL.Query().Get("pushRef"))
+}
+
 func (s *Server) manualRunWorkflow(r *http.Request, request workflowRunRequest) (dataplane.Workflow, error) {
 	if request.WorkflowData != nil {
 		workflow := *request.WorkflowData
@@ -1180,11 +1210,42 @@ func (r workflowRunRequest) startNodeNames() []string {
 	return names
 }
 
+func (r workflowRunRequest) triggerNodeName() string {
+	trimmed := bytes.TrimSpace(r.TriggerToStart)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	var name string
+	if err := json.Unmarshal(trimmed, &name); err == nil {
+		return strings.TrimSpace(name)
+	}
+	var payload struct {
+		Name     string `json:"name"`
+		NodeName string `json:"nodeName"`
+		Node     struct {
+			Name string `json:"name"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(trimmed, &payload); err != nil {
+		return ""
+	}
+	if name := strings.TrimSpace(payload.Name); name != "" {
+		return name
+	}
+	if name := strings.TrimSpace(payload.NodeName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(payload.Node.Name)
+}
+
 func (r workflowRunRequest) startData(destination *engine.DestinationNode) map[string]any {
 	data := map[string]any{}
 	if destination != nil {
 		data["destinationNode"] = destination.NodeName
 		data["destinationMode"] = destination.Mode
+	}
+	if triggerNode := r.triggerNodeName(); triggerNode != "" {
+		data["triggerToStartFrom"] = triggerNode
 	}
 	if names := r.startNodeNames(); len(names) > 0 {
 		data["startNodes"] = names

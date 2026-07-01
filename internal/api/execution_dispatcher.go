@@ -36,6 +36,7 @@ type executionDispatchRequest struct {
 	Options         engine.ExecuteOptions
 	StartData       map[string]any
 	PinData         map[string][]dataplane.Item
+	PushRef         string
 	ErrorName       string
 	Timeout         time.Duration
 	CrashOnDeadline bool
@@ -65,6 +66,7 @@ type executionDispatchPayload struct {
 	PinData         map[string][]dataplane.Item
 	StartData       map[string]any
 	RetryOf         string
+	PushRef         string
 	ScheduledTime   string
 	ResumeURL       string
 	ResumeFormURL   string
@@ -114,19 +116,6 @@ func newExecutionJobDistributor(server *Server) (distribution.JobDistributor, er
 			ResultStream:  cfg.DispatcherStream + ":results",
 			DeadLetterKey: cfg.DispatcherStream + ":dead",
 			Block:         time.Second,
-		})
-	case "nats":
-		subject := cfg.DispatcherStream
-		if subject == "" {
-			subject = "n8n.executions"
-		}
-		return distribution.NewNATSDistributorFromURL(cfg.DispatcherNATSURL, distribution.NATSConfig{
-			StreamName:    strings.ToUpper(strings.NewReplacer(".", "_", ":", "_", "-", "_").Replace(subject)),
-			Subject:       subject,
-			ResultSubject: subject + ".results",
-			DeadSubject:   subject + ".dead",
-			ConsumerName:  cfg.DispatcherConsumer,
-			FetchTimeout:  time.Second,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported execution dispatcher %q", cfg.DispatcherMode)
@@ -366,6 +355,7 @@ func dispatchPayloadFromRequest(request executionDispatchRequest) executionDispa
 		PinData:         request.Options.PinData,
 		StartData:       request.StartData,
 		RetryOf:         retryOfFromStartData(request.StartData),
+		PushRef:         request.PushRef,
 		ScheduledTime:   formatOptionalTime(request.Options.ScheduledTime),
 		ResumeURL:       request.Options.ResumeURL,
 		ResumeFormURL:   request.Options.ResumeFormURL,
@@ -408,6 +398,14 @@ func (p executionDispatchPayload) toRequest(server *Server, done chan executionD
 	}
 	if server != nil {
 		options = server.hydrateExecutionOptions(options)
+		if p.PushRef != "" {
+			options.OnNodeAfter = func(event engine.NodeAfterEvent) {
+				server.pushNodeAfterToSession(p.PushRef, event)
+			}
+			options.OnFinished = func(event engine.ExecutionFinishedEvent) {
+				server.pushExecutionFinishedToSession(p.PushRef, event)
+			}
+		}
 	}
 	return &executionDispatchRequest{
 		ExecutionID:     p.ExecutionID,
@@ -416,6 +414,7 @@ func (p executionDispatchPayload) toRequest(server *Server, done chan executionD
 		Options:         options,
 		StartData:       startData,
 		PinData:         p.PinData,
+		PushRef:         p.PushRef,
 		ErrorName:       p.ErrorName,
 		Timeout:         time.Duration(p.TimeoutMillis) * time.Millisecond,
 		CrashOnDeadline: p.CrashOnDeadline,

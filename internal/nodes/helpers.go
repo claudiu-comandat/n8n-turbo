@@ -29,6 +29,13 @@ func cloneItem(item dataplane.Item) dataplane.Item {
 	return next
 }
 
+func itemWithPairedIndex(item dataplane.Item, index int, overwrite bool) dataplane.Item {
+	if overwrite || item.PairedItem == nil {
+		item.PairedItem = &dataplane.PairedItem{Item: index}
+	}
+	return item
+}
+
 func stringParam(params map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := params[key]; ok {

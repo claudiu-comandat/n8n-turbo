@@ -46,6 +46,10 @@ func (n *Node) sendSMS(ctx context.Context, cred Credential, params map[string]a
 		return nil, fmt.Errorf("message body is required")
 	}
 	form := url.Values{}
+	if boolParam(params, "toWhatsapp") {
+		from = "whatsapp:" + from
+		to = "whatsapp:" + to
+	}
 	form.Set("To", to)
 	form.Set("Body", body)
 	if messagingService := stringParam(params, "messagingServiceSid"); messagingService != "" {
@@ -58,6 +62,7 @@ func (n *Node) sendSMS(ctx context.Context, cred Credential, params map[string]a
 	}
 	formAdd(form, "MediaUrl", stringParam(params, "mediaUrl"))
 	formAdd(form, "StatusCallback", stringParam(params, "statusCallback"))
+	formAdd(form, "StatusCallback", nestedStringParam(params, "options", "statusCallback"))
 	formAdd(form, "ScheduleType", stringParam(params, "scheduleType"))
 	formAdd(form, "SendAt", stringParam(params, "sendAt"))
 	return n.doFormPost(ctx, cred, n.accountURL(cred)+"/Messages.json", form)

@@ -17,6 +17,8 @@ func (n *Node) handleList(ctx context.Context, cred Credential, operation string
 		return itemsFromMaps(n.getLists(ctx, cred, params))
 	case "create":
 		return single(n.createList(ctx, cred, params))
+	case "update":
+		return single(n.updateList(ctx, cred, params))
 	case "addContacts", "addContact":
 		return single(n.addContactsToList(ctx, cred, params))
 	case "delete":
@@ -31,19 +33,33 @@ func (n *Node) getList(ctx context.Context, cred Credential, params map[string]a
 	if id == "" {
 		return nil, fmt.Errorf("listId is required")
 	}
-	return n.doJSON(ctx, cred, http.MethodGet, "/marketing/lists/"+url.PathEscape(id), nil)
+	path := "/marketing/lists/" + url.PathEscape(id)
+	if boolParam(params, "contactSample") {
+		path += "?contact_sample=true"
+	}
+	return n.doJSON(ctx, cred, http.MethodGet, path, nil)
 }
 
 func (n *Node) getLists(ctx context.Context, cred Credential, params map[string]any) ([]map[string]any, error) {
 	pageSize := intParam(params, "pageSize")
 	if pageSize <= 0 {
-		pageSize = 1000
+		pageSize = intParam(params, "limit")
+		if pageSize <= 0 || boolParam(params, "returnAll") {
+			pageSize = 1000
+		}
 	}
 	result, err := n.doJSON(ctx, cred, http.MethodGet, fmt.Sprintf("/marketing/lists?page_size=%d", pageSize), nil)
 	if err != nil {
 		return nil, err
 	}
-	return listFrom(result, "result"), nil
+	lists := listFrom(result, "result")
+	if !boolParam(params, "returnAll") {
+		limit := intParam(params, "limit")
+		if limit > 0 && len(lists) > limit {
+			lists = lists[:limit]
+		}
+	}
+	return lists, nil
 }
 
 func (n *Node) createList(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
@@ -52,6 +68,18 @@ func (n *Node) createList(ctx context.Context, cred Credential, params map[strin
 		return nil, fmt.Errorf("name is required")
 	}
 	return n.doJSON(ctx, cred, http.MethodPost, "/marketing/lists", map[string]any{"name": name})
+}
+
+func (n *Node) updateList(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {
+	id := stringParam(params, "listId", "id")
+	if id == "" {
+		return nil, fmt.Errorf("listId is required")
+	}
+	name := stringParam(params, "name", "listName")
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	return n.doJSON(ctx, cred, http.MethodPatch, "/marketing/lists/"+url.PathEscape(id), map[string]any{"name": name})
 }
 
 func (n *Node) addContactsToList(ctx context.Context, cred Credential, params map[string]any) (map[string]any, error) {

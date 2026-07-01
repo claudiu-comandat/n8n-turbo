@@ -2,10 +2,10 @@ FROM golang:1.25-alpine AS go-builder
 
 WORKDIR /src
 RUN apk add --no-cache ca-certificates git tzdata
-COPY go.mod go.sum ./
+COPY n8n-turbo/go.mod n8n-turbo/go.sum ./
 RUN go mod download
-COPY cmd ./cmd
-COPY internal ./internal
+COPY n8n-turbo/cmd ./cmd
+COPY n8n-turbo/internal ./internal
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
@@ -15,11 +15,26 @@ FROM alpine:3.22 AS runtime
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
+ARG EDITOR_UI_VERSION=2.16.2
+ARG NODES_BASE_VERSION=2.16.0
+ARG LANGCHAIN_NODES_VERSION=2.16.1
 
-RUN apk add --no-cache ca-certificates tzdata curl go python3 poppler-utils ghostscript imagemagick && addgroup -g 1000 n8n && adduser -u 1000 -G n8n -s /bin/sh -D n8n
+RUN apk add --no-cache ca-certificates tzdata curl go nodejs npm python3 poppler-utils ghostscript imagemagick && addgroup -g 1000 n8n && adduser -u 1000 -G n8n -s /bin/sh -D n8n
 WORKDIR /app
 COPY --from=go-builder /out/n8n-turbo /app/n8n-turbo
-COPY ui /app/ui
+COPY n8n-turbo/package.json n8n-turbo/package-lock.json /app/
+RUN npm ci --omit=dev --ignore-scripts
+RUN mkdir -p /app/ui \
+	&& curl -fsSL "https://registry.npmjs.org/n8n-editor-ui/-/n8n-editor-ui-${EDITOR_UI_VERSION}.tgz" | tar -xz -C /tmp \
+	&& cp -R /tmp/package/dist/. /app/ui \
+	&& rm -rf /tmp/package \
+	&& mkdir -p /app/ui/icons/n8n-nodes-base /app/ui/icons/@n8n/n8n-nodes-langchain \
+	&& curl -fsSL "https://registry.npmjs.org/n8n-nodes-base/-/n8n-nodes-base-${NODES_BASE_VERSION}.tgz" | tar -xz -C /tmp \
+	&& cp -R /tmp/package/dist /app/ui/icons/n8n-nodes-base/dist \
+	&& rm -rf /tmp/package \
+	&& curl -fsSL "https://registry.npmjs.org/@n8n/n8n-nodes-langchain/-/n8n-nodes-langchain-${LANGCHAIN_NODES_VERSION}.tgz" | tar -xz -C /tmp \
+	&& cp -R /tmp/package/dist /app/ui/icons/@n8n/n8n-nodes-langchain/dist \
+	&& rm -rf /tmp/package
 RUN mkdir -p /app/data /app/logs /app/storage/binary && chown -R n8n:n8n /app
 USER n8n
 VOLUME ["/app/data", "/app/logs", "/app/storage"]

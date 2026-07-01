@@ -12,11 +12,12 @@ import (
 type SplitOut struct{}
 
 type splitOutParams struct {
-	FieldToSplitOut      string
-	Include              string
-	FieldsToInclude      []string
-	DisableDotNotation   bool
-	DestinationFieldName string
+	FieldsToSplitOut   []string
+	Include            string
+	FieldsToInclude    []string
+	DisableDotNotation bool
+	DestinationFields  []string
+	IncludeBinary      bool
 }
 
 func (SplitOut) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Output, error) {
@@ -26,18 +27,56 @@ func (SplitOut) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.
 	default:
 	}
 	params := parseSplitOutParams(in.Node.Parameters)
-	if params.FieldToSplitOut == "" {
+	if len(params.FieldsToSplitOut) == 0 {
 		return nil, fmt.Errorf("splitOut fieldToSplitOut is required")
 	}
+	if len(params.DestinationFields) > 0 && len(params.DestinationFields) != len(params.FieldsToSplitOut) {
+		return nil, fmt.Errorf("splitOut: if multiple fields to split out are given, the same number of destination fields must be given")
+	}
 	result := make([]dataplane.Item, 0)
-	for _, item := range firstInput(in.InputData) {
-		values := splitOutValues(splitOutSourceValue(item.JSON, params))
-		if len(values) == 0 {
-			result = append(result, buildSplitOutItem(item, params, nil, false))
-			continue
+	for itemIndex, item := range firstInput(in.InputData) {
+		splitItems := make([]dataplane.Item, 0)
+		multiSplit := len(params.FieldsToSplitOut) > 1
+		for fieldIndex, field := range params.FieldsToSplitOut {
+			destination := ""
+			if fieldIndex < len(params.DestinationFields) {
+				destination = params.DestinationFields[fieldIndex]
+			}
+			values := splitOutFieldValues(item, field, params)
+			for valueIndex, value := range values {
+				for len(splitItems) <= valueIndex {
+					splitItems = append(splitItems, dataplane.Item{
+						JSON:       map[string]any{},
+						PairedItem: &dataplane.PairedItem{Item: itemIndex},
+					})
+				}
+				applySplitOutValue(&splitItems[valueIndex], field, destination, value, params.Include, multiSplit)
+			}
 		}
-		for _, value := range values {
-			result = append(result, buildSplitOutItem(item, params, value, true))
+		for _, splitItem := range splitItems {
+			next := splitItem
+			switch strings.ToLower(params.Include) {
+			case "allotherfields", "all":
+				base := deepCopySetMap(item.JSON)
+				for _, field := range params.FieldsToSplitOut {
+					removeSplitOutField(base, field, params.DisableDotNotation)
+				}
+				for key, value := range splitItem.JSON {
+					base[key] = value
+				}
+				next.JSON = base
+			case "selectedotherfields", "selected":
+				if len(params.FieldsToInclude) == 0 {
+					return nil, fmt.Errorf("splitOut: no fields specified to include")
+				}
+				for _, field := range params.FieldsToInclude {
+					next.JSON[field] = deepCopySetValue(splitOutJSONValue(item.JSON, field, params.DisableDotNotation))
+				}
+			}
+			if params.IncludeBinary && item.Binary != nil && next.Binary == nil {
+				next.Binary = item.Binary
+			}
+			result = append(result, next)
 		}
 	}
 	return dataplane.MainOutput(result), nil
@@ -45,12 +84,14 @@ func (SplitOut) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.
 
 func parseSplitOutParams(raw map[string]any) splitOutParams {
 	options := mergeObject(raw["options"])
+	fieldsToSplitOut := splitOutFields(firstNonEmptyNode(stringParam(raw, "fieldToSplitOut"), stringParam(raw, "field", "propertyName")))
 	return splitOutParams{
-		FieldToSplitOut:      stringParam(raw, "fieldToSplitOut", "field", "propertyName"),
-		Include:              firstNonEmptyNode(stringParam(raw, "include"), "noOtherFields"),
-		FieldsToInclude:      splitOutFields(raw["fieldsToInclude"]),
-		DisableDotNotation:   boolParam(options, "disableDotNotation", boolParam(raw, "disableDotNotation", false)),
-		DestinationFieldName: firstNonEmptyNode(stringParam(options, "destinationFieldName"), stringParam(raw, "destinationFieldName")),
+		FieldsToSplitOut:   fieldsToSplitOut,
+		Include:            firstNonEmptyNode(stringParam(raw, "include"), "noOtherFields"),
+		FieldsToInclude:    splitOutFields(raw["fieldsToInclude"]),
+		DisableDotNotation: boolParam(options, "disableDotNotation", boolParam(raw, "disableDotNotation", false)),
+		DestinationFields:  splitOutFields(firstNonEmptyNode(stringParam(options, "destinationFieldName"), stringParam(raw, "destinationFieldName"))),
+		IncludeBinary:      boolParam(options, "includeBinary", boolParam(raw, "includeBinary", false)),
 	}
 }
 
@@ -58,7 +99,7 @@ func splitOutFields(value any) []string {
 	if values, ok := value.([]any); ok {
 		result := make([]string, 0, len(values))
 		for _, value := range values {
-			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+			if text := normalizeSplitOutField(fmt.Sprint(value)); text != "" {
 				result = append(result, text)
 			}
 		}
@@ -71,18 +112,37 @@ func splitOutFields(value any) []string {
 	parts := strings.Split(text, ",")
 	result := make([]string, 0, len(parts))
 	for _, part := range parts {
-		if trimmed := strings.TrimSpace(part); trimmed != "" {
+		if trimmed := normalizeSplitOutField(part); trimmed != "" {
 			result = append(result, trimmed)
 		}
 	}
 	return result
 }
 
-func splitOutSourceValue(data map[string]any, params splitOutParams) any {
-	if !params.DisableDotNotation && strings.Contains(params.FieldToSplitOut, ".") {
-		return nestedMergeValue(data, params.FieldToSplitOut)
+func normalizeSplitOutField(field string) string {
+	field = strings.TrimSpace(field)
+	if strings.HasPrefix(field, "$json.") {
+		return strings.TrimPrefix(field, "$json.")
 	}
-	return data[params.FieldToSplitOut]
+	return field
+}
+
+func splitOutFieldValues(item dataplane.Item, field string, params splitOutParams) []any {
+	if field == "$binary" {
+		values := make([]any, 0, len(item.Binary))
+		for key, value := range item.Binary {
+			values = append(values, map[string]dataplane.Binary{key: value})
+		}
+		return values
+	}
+	return splitOutValues(splitOutJSONValue(item.JSON, field, params.DisableDotNotation))
+}
+
+func splitOutJSONValue(data map[string]any, field string, disableDotNotation bool) any {
+	if !disableDotNotation && strings.Contains(field, ".") {
+		return nestedMergeValue(data, field)
+	}
+	return data[field]
 }
 
 func splitOutValues(value any) []any {
@@ -91,50 +151,60 @@ func splitOutValues(value any) []any {
 		return nil
 	case []any:
 		return typed
+	case map[string]any:
+		values := make([]any, 0, len(typed))
+		for _, value := range typed {
+			values = append(values, value)
+		}
+		return values
 	default:
 		return []any{typed}
 	}
 }
 
-func buildSplitOutItem(source dataplane.Item, params splitOutParams, value any, hasValue bool) dataplane.Item {
-	next := dataplane.Item{JSON: splitOutBaseJSON(source.JSON, params), Binary: source.Binary, PairedItem: source.PairedItem, Error: source.Error}
-	if !hasValue {
-		return next
-	}
-	destination := params.DestinationFieldName
-	if destination != "" {
-		next.JSON[destination] = value
-		return next
-	}
-	if object, ok := value.(map[string]any); ok {
-		for key, value := range object {
-			next.JSON[key] = deepCopySetValue(value)
+func applySplitOutValue(item *dataplane.Item, field string, destination string, value any, include string, multiSplit bool) {
+	if field == "$binary" {
+		object, ok := value.(map[string]dataplane.Binary)
+		if !ok {
+			return
 		}
-		return next
+		if item.Binary == nil {
+			item.Binary = map[string]dataplane.Binary{}
+		}
+		for key, value := range object {
+			item.Binary[key] = value
+		}
+		return
 	}
-	next.JSON[params.FieldToSplitOut] = value
-	return next
+	fieldName := destination
+	if fieldName == "" {
+		fieldName = field
+	}
+	if object, ok := value.(map[string]any); ok && strings.EqualFold(include, "noOtherFields") && destination == "" && !multiSplit {
+		for key, value := range object {
+			item.JSON[key] = deepCopySetValue(value)
+		}
+		return
+	}
+	item.JSON[fieldName] = deepCopySetValue(value)
 }
 
-func splitOutBaseJSON(source map[string]any, params splitOutParams) map[string]any {
-	switch strings.ToLower(params.Include) {
-	case "allotherfields", "all":
-		result := deepCopySetMap(source)
-		delete(result, params.FieldToSplitOut)
-		return result
-	case "selectedotherfields", "selected":
-		result := map[string]any{}
-		for _, field := range params.FieldsToInclude {
-			value := source[field]
-			if !params.DisableDotNotation && strings.Contains(field, ".") {
-				value = nestedMergeValue(source, field)
-			}
-			if value != nil {
-				result[field] = deepCopySetValue(value)
-			}
+func removeSplitOutField(data map[string]any, field string, disableDotNotation bool) {
+	if disableDotNotation || !strings.Contains(field, ".") {
+		delete(data, field)
+		return
+	}
+	parts := strings.Split(field, ".")
+	current := data
+	for index, part := range parts {
+		if index == len(parts)-1 {
+			delete(current, part)
+			return
 		}
-		return result
-	default:
-		return map[string]any{}
+		next, ok := current[part].(map[string]any)
+		if !ok {
+			return
+		}
+		current = next
 	}
 }

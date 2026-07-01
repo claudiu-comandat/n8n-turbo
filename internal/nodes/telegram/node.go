@@ -74,16 +74,22 @@ func (n *Node) executeOne(ctx context.Context, cred *Credential, resource string
 		key = operation
 	}
 	switch key {
-	case "sendMessage", "message:sendMessage":
+	case "sendMessage", "message:sendMessage", "sendAndWait", "message:sendAndWait":
 		return single(n.sendMessage(ctx, cred, params))
 	case "sendPhoto", "message:sendPhoto":
 		return single(n.sendMedia(ctx, cred, params, item, "sendPhoto", "photo"))
+	case "sendAnimation", "message:sendAnimation":
+		return single(n.sendMedia(ctx, cred, params, item, "sendAnimation", "animation"))
 	case "sendDocument", "message:sendDocument":
 		return single(n.sendMedia(ctx, cred, params, item, "sendDocument", "document"))
 	case "sendVideo", "message:sendVideo":
 		return single(n.sendMedia(ctx, cred, params, item, "sendVideo", "video"))
 	case "sendAudio", "message:sendAudio":
 		return single(n.sendMedia(ctx, cred, params, item, "sendAudio", "audio"))
+	case "sendSticker", "message:sendSticker":
+		return single(n.sendMedia(ctx, cred, params, item, "sendSticker", "sticker"))
+	case "sendMediaGroup", "message:sendMediaGroup":
+		return single(n.sendMediaGroup(ctx, cred, params))
 	case "sendLocation", "message:sendLocation":
 		return single(n.sendLocation(ctx, cred, params))
 	case "sendChatAction", "message:sendChatAction":
@@ -98,10 +104,22 @@ func (n *Node) executeOne(ctx context.Context, cred *Credential, resource string
 		return single(n.simpleChatCall(ctx, cred, params, "unpinChatMessage", "message_id"))
 	case "getUpdates", "update:getUpdates":
 		return n.getUpdates(ctx, cred, params)
-	case "answerCallbackQuery", "callback:answerCallbackQuery":
+	case "answerCallbackQuery", "answerQuery", "callback:answerCallbackQuery", "callback:answerQuery":
 		return single(n.answerCallbackQuery(ctx, cred, params))
-	case "getChat", "chat:getChat":
+	case "answerInlineQuery", "callback:answerInlineQuery":
+		return single(n.answerInlineQuery(ctx, cred, params))
+	case "getChat", "chat:getChat", "chat:get":
 		return single(n.simpleChatCall(ctx, cred, params, "getChat"))
+	case "getChatAdministrators", "chat:administrators":
+		return single(n.simpleChatCall(ctx, cred, params, "getChatAdministrators"))
+	case "getChatMember", "chat:member":
+		return single(n.simpleChatCall(ctx, cred, params, "getChatMember", "user_id"))
+	case "leaveChat", "chat:leave":
+		return single(n.simpleChatCall(ctx, cred, params, "leaveChat"))
+	case "setChatDescription", "chat:setDescription":
+		return single(n.simpleChatCall(ctx, cred, params, "setChatDescription", "description"))
+	case "setChatTitle", "chat:setTitle":
+		return single(n.simpleChatCall(ctx, cred, params, "setChatTitle", "title"))
 	case "getChatMemberCount", "chat:getChatMemberCount":
 		return single(n.simpleChatCall(ctx, cred, params, "getChatMemberCount"))
 	case "banChatMember", "chat:banChatMember":
@@ -114,7 +132,7 @@ func (n *Node) executeOne(ctx context.Context, cred *Credential, resource string
 		return single(n.callAPI(ctx, cred, "deleteWebhook", map[string]any{"drop_pending_updates": boolParam(params, "dropPendingUpdates")}, ""))
 	case "getWebhookInfo", "webhook:getWebhookInfo":
 		return single(n.callAPI(ctx, cred, "getWebhookInfo", map[string]any{}, ""))
-	case "getFile", "file:getFile":
+	case "getFile", "file:getFile", "file:get":
 		return single(n.getFile(ctx, cred, params))
 	case "downloadFile", "file:downloadFile":
 		return single(n.downloadFile(ctx, cred, params))
