@@ -250,7 +250,7 @@ func (s *Server) handleLastSuccessfulWorkflowExecution(w http.ResponseWriter, r 
 	}
 	for _, execution := range executions {
 		if execution.Status == "success" {
-			writeJSON(w, http.StatusOK, map[string]any{"data": execution})
+			writeJSON(w, http.StatusOK, map[string]any{"data": executionResponse(execution)})
 			return
 		}
 	}
@@ -1033,6 +1033,13 @@ func executionDataForFrontend(raw json.RawMessage) string {
 	text := string(raw)
 	parsed, err := flatted.Parse(text)
 	if err != nil {
+		var plain any
+		if jsonErr := json.Unmarshal(raw, &plain); jsonErr == nil {
+			normalizeExecutionDataShape(plain)
+			if converted, jsonErr := json.Marshal(plain); jsonErr == nil {
+				return string(converted)
+			}
+		}
 		return text
 	}
 	normalizeExecutionDataShape(parsed)

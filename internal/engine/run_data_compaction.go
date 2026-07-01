@@ -10,7 +10,6 @@ import (
 )
 
 const (
-	maxStoredItemsPerBranch   = 256
 	maxStoredStringValueBytes = 64 * 1024
 )
 
@@ -29,27 +28,9 @@ func compactTaskData(ctx context.Context, task dataplane.TaskData, store binaryd
 func compactOutput(ctx context.Context, output dataplane.Output, store binarydata.Store) dataplane.Output {
 	compacted := make(dataplane.Output, len(output))
 	for outputIndex, items := range output {
-		kept := items
-		truncated := false
-		if len(items) > maxStoredItemsPerBranch {
-			kept = items[:maxStoredItemsPerBranch]
-			truncated = true
-		}
-		next := make([]dataplane.Item, 0, len(kept)+1)
-		for _, item := range kept {
+		next := make([]dataplane.Item, 0, len(items))
+		for _, item := range items {
 			next = append(next, compactItem(ctx, item, store))
-		}
-		if truncated {
-			next = append(next, dataplane.Item{
-				JSON: map[string]any{
-					"__n8nTurboMeta": map[string]any{
-						"truncated":  true,
-						"totalItems": len(items),
-						"keptItems":  len(kept),
-						"outputIndex": outputIndex,
-					},
-				},
-			})
 		}
 		compacted[outputIndex] = next
 	}
@@ -90,29 +71,17 @@ func compactJSONValue(value any) any {
 		}
 		return typed[:maxStoredStringValueBytes] + "...[truncated]"
 	case []string:
-		if len(typed) <= maxStoredItemsPerBranch {
-			return typed
-		}
-		return append(append([]string{}, typed[:maxStoredItemsPerBranch]...), "...[truncated]")
+		return append([]string{}, typed...)
 	case []any:
-		if len(typed) <= maxStoredItemsPerBranch {
-			return typed
-		}
-		next := make([]any, 0, maxStoredItemsPerBranch+1)
-		for _, entry := range typed[:maxStoredItemsPerBranch] {
+		next := make([]any, 0, len(typed))
+		for _, entry := range typed {
 			next = append(next, compactJSONValue(entry))
 		}
-		return append(next, map[string]any{"__n8nTurboMeta": map[string]any{"truncated": true, "totalItems": len(typed)}})
+		return next
 	case map[string]any:
 		next := make(map[string]any, len(typed))
-		count := 0
 		for key, entry := range typed {
-			if count >= maxStoredItemsPerBranch {
-				next["__n8nTurboMeta"] = map[string]any{"truncated": true, "totalKeys": len(typed)}
-				break
-			}
 			next[key] = compactJSONValue(entry)
-			count++
 		}
 		return next
 	default:
