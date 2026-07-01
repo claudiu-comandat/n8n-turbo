@@ -37,7 +37,6 @@ RUN mkdir -p /app/ui \
 	&& rm -rf /tmp/package
 RUN mkdir -p /app/data /app/logs /app/storage/binary && chown -R n8n:n8n /app
 USER n8n
-VOLUME ["/app/data", "/app/logs", "/app/storage"]
 EXPOSE 5678
 ENV N8N_HOST=0.0.0.0
 ENV N8N_PORT=5678
