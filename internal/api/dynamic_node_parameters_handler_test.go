@@ -127,3 +127,35 @@ func TestDynamicNodeParameterOptionsReturnsProviderSpecificFallbackModels(t *tes
 		})
 	}
 }
+
+func TestDynamicNodeParameterOptionsIgnoresUnknownPostgresMethod(t *testing.T) {
+	t.Parallel()
+
+	var request dynamicNodeParameterOptionsRequest
+	request.NodeTypeAndVersion.Name = "n8n-nodes-base.postgres"
+	request.MethodName = "unknown"
+
+	options, err := (&Server{}).dynamicNodeParameterOptions(context.Background(), request)
+	if err != nil {
+		t.Fatalf("dynamic options: %v", err)
+	}
+	if len(options) != 0 {
+		t.Fatalf("unexpected postgres options: %#v", options)
+	}
+}
+
+func TestDynamicParamStringReadsResourceLocatorValue(t *testing.T) {
+	t.Parallel()
+
+	request := dynamicNodeParameterOptionsRequest{
+		CurrentNodeParameters: map[string]any{
+			"schema": map[string]any{"mode": "list", "value": "public"},
+		},
+		NodeParameters: map[string]any{
+			"schema": "fallback",
+		},
+	}
+	if got := dynamicParamString(request, "schema"); got != "public" {
+		t.Fatalf("schema = %q, want public", got)
+	}
+}
