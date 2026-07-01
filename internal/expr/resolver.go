@@ -17,7 +17,7 @@ type Resolver struct {
 	timeout time.Duration
 }
 
-var templateExpression = regexp.MustCompile(`=\s*\{\{\s*(.*?)\s*\}\}`)
+var templateExpression = regexp.MustCompile(`=?\s*\{\{\s*(.*?)\s*\}\}`)
 var fullTemplateExpression = regexp.MustCompile(`^\s*=\s*\{\{\s*(.*?)\s*\}\}\s*$`)
 
 func NewResolver(timeout time.Duration) *Resolver {

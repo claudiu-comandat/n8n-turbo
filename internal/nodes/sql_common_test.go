@@ -50,6 +50,34 @@ func TestSQLExecuteQueryUsesOfficialQueryReplacementOption(t *testing.T) {
 	}
 }
 
+func TestSQLExecuteQueryRunsMultipleStatementsWithQueryReplacement(t *testing.T) {
+	t.Parallel()
+
+	db := openSQLiteTestDB(t)
+
+	out, err := executeSQLNode(context.Background(), db, testInput(map[string]any{
+		"operation": "executeQuery",
+		"query":     `CREATE TABLE "{{ $json.tableName }}" (id TEXT); INSERT INTO "{{ $json.tableName }}" (id) VALUES (?)`,
+		"options": map[string]any{
+			"queryReplacement": "abc",
+		},
+	}, []dataplane.Item{{JSON: map[string]any{"tableName": "invoice-1"}}}), sqliteTestDialect)
+	if err != nil {
+		t.Fatalf("execute multi statement query: %v", err)
+	}
+	if got := len(out[0]); got != 2 {
+		t.Fatalf("expected one result per statement, got %d", got)
+	}
+
+	rows, err := sqlQueryRows(context.Background(), db, `SELECT id FROM "invoice-1"`)
+	if err != nil {
+		t.Fatalf("select inserted row: %v", err)
+	}
+	if got := rows[0].JSON["id"]; got != "abc" {
+		t.Fatalf("unexpected inserted row: %#v", rows[0].JSON)
+	}
+}
+
 func TestSQLMissingOperationDefaultsToOfficialInsertWhenStructured(t *testing.T) {
 	t.Parallel()
 

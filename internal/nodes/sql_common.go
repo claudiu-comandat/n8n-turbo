@@ -91,6 +91,28 @@ func sqlExecuteQueryWithRunner(ctx context.Context, runner sqlRunner, in engine.
 			return nil, fmt.Errorf("%s query is required", dialect.Name)
 		}
 		args := sqlArgs(in, items, index)
+		if statements := sqlStatements(query); len(statements) > 1 {
+			for _, statement := range statements {
+				statementArgs := []any(nil)
+				if sqlStatementUsesArgs(statement, dialect) {
+					statementArgs = args
+				}
+				if sqlReturnsRows(statement) {
+					rows, err := sqlQueryRowsWithRunner(ctx, runner, statement, statementArgs...)
+					if err != nil {
+						return nil, err
+					}
+					output = append(output, rows...)
+					continue
+				}
+				result, err := runner.ExecContext(ctx, statement, statementArgs...)
+				if err != nil {
+					return nil, err
+				}
+				output = append(output, sqlResultItem(result))
+			}
+			continue
+		}
 		if sqlReturnsRows(query) {
 			rows, err := sqlQueryRowsWithRunner(ctx, runner, query, args...)
 			if err != nil {
@@ -901,6 +923,32 @@ func sqlReturnsRows(query string) bool {
 	default:
 		return false
 	}
+}
+
+func sqlStatements(query string) []string {
+	parts := strings.Split(query, ";")
+	if len(parts) == 1 {
+		return []string{strings.TrimSpace(query)}
+	}
+	statements := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if statement := strings.TrimSpace(part); statement != "" {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}
+
+func sqlStatementUsesArgs(statement string, dialect sqlDialect) bool {
+	if dialect.Name == "postgres" {
+		for i := 0; i < len(statement)-1; i++ {
+			if statement[i] == '$' && statement[i+1] >= '0' && statement[i+1] <= '9' {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.Contains(statement, "?")
 }
 
 func sqlIdent(value string, dialect sqlDialect) string {
