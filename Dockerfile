@@ -19,7 +19,7 @@ ARG EDITOR_UI_VERSION=2.16.2
 ARG NODES_BASE_VERSION=2.16.0
 ARG LANGCHAIN_NODES_VERSION=2.16.1
 
-RUN apk add --no-cache ca-certificates tzdata curl go nodejs npm python3 poppler-utils ghostscript imagemagick && addgroup -g 1000 n8n && adduser -u 1000 -G n8n -s /bin/sh -D n8n
+RUN apk add --no-cache ca-certificates tzdata curl go nodejs npm python3 poppler-utils ghostscript imagemagick
 WORKDIR /app
 COPY --from=go-builder /out/n8n-turbo /app/n8n-turbo
 COPY package.json package-lock.json /app/
@@ -35,8 +35,7 @@ RUN mkdir -p /app/ui \
 	&& curl -fsSL "https://registry.npmjs.org/@n8n/n8n-nodes-langchain/-/n8n-nodes-langchain-${LANGCHAIN_NODES_VERSION}.tgz" | tar -xz -C /tmp \
 	&& cp -R /tmp/package/dist /app/ui/icons/@n8n/n8n-nodes-langchain/dist \
 	&& rm -rf /tmp/package
-RUN mkdir -p /app/data /app/logs /app/storage/binary && chown -R n8n:n8n /app
-USER n8n
+RUN mkdir -p /app/data /app/logs /app/storage/binary
 EXPOSE 5678
 ENV N8N_HOST=0.0.0.0
 ENV N8N_PORT=5678
