@@ -62,7 +62,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.setSecurityHeaders(w)
 	if filepath.Ext(path) != "" {
 		if !h.fileExists(path) {
-			h.serveIndex(w, r)
+			http.NotFound(w, r)
 			return
 		}
 		h.setCacheHeaders(w, path)
@@ -76,7 +76,6 @@ func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
-	w.Header().Set("Clear-Site-Data", `"cache"`)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	ApplyCSP(h.config.CSP, w)
 	content, err := fs.ReadFile(h.files, "index.html")
@@ -147,10 +146,6 @@ func (h *Handler) servesTransformedAsset(w http.ResponseWriter, path string) boo
 }
 
 func (h *Handler) setCacheHeaders(w http.ResponseWriter, path string) {
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Expires", "0")
-	return
 	if h.config.DevMode {
 		w.Header().Set("Cache-Control", "no-cache")
 		return
