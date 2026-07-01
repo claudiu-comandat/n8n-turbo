@@ -1,6 +1,8 @@
 package metadata
 
 import (
+	"encoding/json"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -76,6 +78,9 @@ func applyNodeMetadataCompat(raw map[string]any, name string) {
 			"description": "Comma-separated list of URLs allowed for cross-origin non-preflight requests. Use * (default) to allow all origins.",
 		})
 	}
+	if name == "n8n-nodes-base.code" {
+		ensureCodeGoSupport(raw)
+	}
 	if name == "n8n-nodes-base.filter" {
 		raw["version"] = []any{1, 2, 2.1, 2.2, 2.3}
 		showPropertyForVersion(raw, "conditions", "filter", map[string]any{"@version": []any{map[string]any{"_cnd": map[string]any{"gte": 2}}}})
@@ -86,6 +91,27 @@ func applyNodeMetadataCompat(raw map[string]any, name string) {
 	if name == "@n8n/n8n-nodes-langchain.agent" {
 		raw["version"] = []any{2, 2.1, 2.2, 3, 3.1}
 	}
+}
+
+func ensureCodeGoSupport(raw map[string]any) {
+	raw["description"] = "Runs JavaScript, Python, or Go code"
+	ensurePropertyOption(raw, "language", map[string]any{"name": "Go", "value": "go"})
+	for _, property := range codeNodeProps() {
+		if property.Name != "goCode" && !propertyShowsLanguage(property, "go") {
+			continue
+		}
+		ensureRawProperty(raw, rawProperty(property))
+	}
+}
+
+func propertyShowsLanguage(property Property, language string) bool {
+	show, _ := property.DisplayOptions["show"].(map[string][]any)
+	for _, value := range show["language"] {
+		if value == language {
+			return true
+		}
+	}
+	return false
 }
 
 func ensureProperty(raw map[string]any, property map[string]any) {
@@ -101,6 +127,57 @@ func ensureProperty(raw map[string]any, property map[string]any) {
 		}
 	}
 	raw["properties"] = append(properties, property)
+}
+
+func ensureRawProperty(raw map[string]any, property map[string]any) {
+	name, _ := property["name"].(string)
+	propertyType, _ := property["type"].(string)
+	if name == "" || propertyType == "" {
+		return
+	}
+	properties, _ := raw["properties"].([]any)
+	for _, entry := range properties {
+		existing, ok := entry.(map[string]any)
+		if !ok || existing["name"] != name || existing["type"] != propertyType {
+			continue
+		}
+		if reflect.DeepEqual(existing["displayOptions"], property["displayOptions"]) {
+			return
+		}
+	}
+	raw["properties"] = append(properties, property)
+}
+
+func ensurePropertyOption(raw map[string]any, propertyName string, option map[string]any) {
+	optionValue := option["value"]
+	properties, _ := raw["properties"].([]any)
+	for _, entry := range properties {
+		property, ok := entry.(map[string]any)
+		if !ok || property["name"] != propertyName {
+			continue
+		}
+		options, _ := property["options"].([]any)
+		for _, entry := range options {
+			existing, ok := entry.(map[string]any)
+			if ok && existing["value"] == optionValue {
+				return
+			}
+		}
+		property["options"] = append(options, option)
+		return
+	}
+}
+
+func rawProperty(property Property) map[string]any {
+	bytes, err := json.Marshal(property)
+	if err != nil {
+		return nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(bytes, &raw); err != nil {
+		return nil
+	}
+	return raw
 }
 
 func showPropertyForVersion(raw map[string]any, name string, propertyType string, show map[string]any) {

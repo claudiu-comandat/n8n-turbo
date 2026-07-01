@@ -183,6 +183,7 @@ func TestExposedNodeMetadataStaysOriginalExceptMigrationCompat(t *testing.T) {
 func metadataCompatNode(name string) bool {
 	switch name {
 	case "@n8n/n8n-nodes-langchain.agent",
+		"n8n-nodes-base.code",
 		"n8n-nodes-base.filter",
 		"n8n-nodes-base.n8n",
 		"n8n-nodes-base.webhook":
@@ -238,6 +239,28 @@ func TestWebhookOptionsExposeAllowedOriginsForCopyPasteParity(t *testing.T) {
 		return
 	}
 	t.Fatal("Webhook options should expose allowedOrigins like original n8n")
+}
+
+func TestCodeNodeExposesGoLanguageForTurboRunner(t *testing.T) {
+	t.Parallel()
+
+	node, ok := NodeTypeByName("n8n-nodes-base.code", nil)
+	if !ok {
+		t.Fatal("expected Code node metadata")
+	}
+	language := testRawProperty(node.Raw, "language", "")
+	if language == nil {
+		t.Fatal("Code node should expose language selector")
+	}
+	if !propertyHasOption(language, "go") {
+		t.Fatal("Code node language selector should expose Go")
+	}
+	if testRawProperty(node.Raw, "goCode", "runOnceForAllItems") == nil {
+		t.Fatal("Code node should expose Go editor in all-items mode")
+	}
+	if testRawProperty(node.Raw, "goCode", "runOnceForEachItem") == nil {
+		t.Fatal("Code node should expose Go editor in per-item mode")
+	}
 }
 
 func TestFilterExposesV1ConditionsForMigratedWorkflows(t *testing.T) {
@@ -353,6 +376,46 @@ func originalTopLevelParameterNames(nodeType string) map[string]bool {
 		}
 	}
 	return names
+}
+
+func testRawProperty(raw map[string]any, name string, mode string) map[string]any {
+	properties, ok := raw["properties"].([]any)
+	if !ok {
+		return nil
+	}
+	for _, entry := range properties {
+		prop, ok := entry.(map[string]any)
+		if !ok || prop["name"] != name {
+			continue
+		}
+		if mode == "" || propertyShowsMode(prop, mode) {
+			return prop
+		}
+	}
+	return nil
+}
+
+func propertyShowsMode(prop map[string]any, mode string) bool {
+	displayOptions, _ := prop["displayOptions"].(map[string]any)
+	show, _ := displayOptions["show"].(map[string]any)
+	modes, _ := show["mode"].([]any)
+	for _, value := range modes {
+		if value == mode {
+			return true
+		}
+	}
+	return false
+}
+
+func propertyHasOption(prop map[string]any, value string) bool {
+	options, _ := prop["options"].([]any)
+	for _, entry := range options {
+		option, ok := entry.(map[string]any)
+		if ok && option["value"] == value {
+			return true
+		}
+	}
+	return false
 }
 
 func collectionOptions(raw map[string]any, name string) []map[string]any {
