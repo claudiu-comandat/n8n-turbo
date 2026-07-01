@@ -1044,6 +1044,9 @@ func (s *Server) logging(next http.Handler) http.Handler {
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
 		duration := time.Since(started)
+		if r.URL.Path == "/healthz" && recorder.status < http.StatusBadRequest {
+			return
+		}
 		log.Printf("http request method=%s path=%s status=%d duration=%s bytes=%d ip=%s requestId=%s", r.Method, r.URL.Path, recorder.status, duration, recorder.bytes, clientIP(r), requestIDFromContext(r.Context()))
 		if s.logStream == nil {
 			return
