@@ -110,6 +110,32 @@ func TestSQLQueryReplacementKeepsJSONArgumentTogether(t *testing.T) {
 	}
 }
 
+func TestSQLQueryReplacementKeepsSinglePlaceholderJSONBatchWhole(t *testing.T) {
+	t.Parallel()
+
+	batch := []any{
+		map[string]any{"ASIN": "B0FSKD4JMD", "Product_SKU": "220526-00047-1385179"},
+		map[string]any{"ASIN": "B0G5YJGDZS", "Product_SKU": "020626-00047-1403243"},
+	}
+	in := testInput(map[string]any{
+		"options": map[string]any{
+			"queryReplacement": `{{ JSON.stringify($json.batch) }}`,
+		},
+	}, []dataplane.Item{{JSON: map[string]any{"batch": batch}}})
+
+	args := sqlArgsForQuery(in, firstInput(in.InputData), 0, `SELECT * FROM json_to_recordset($1)`, postgresDialect)
+	if len(args) != 1 {
+		t.Fatalf("expected one whole JSON argument, got %d: %#v", len(args), args)
+	}
+	arg, ok := args[0].(string)
+	if !ok {
+		t.Fatalf("expected JSON string argument, got %T: %#v", args[0], args[0])
+	}
+	if !strings.Contains(arg, `"B0FSKD4JMD"`) || !strings.Contains(arg, `"B0G5YJGDZS"`) {
+		t.Fatalf("JSON argument lost batch items: %s", arg)
+	}
+}
+
 func TestSQLMissingOperationDefaultsToOfficialInsertWhenStructured(t *testing.T) {
 	t.Parallel()
 

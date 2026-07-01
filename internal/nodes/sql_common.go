@@ -90,7 +90,7 @@ func sqlExecuteQueryWithRunner(ctx context.Context, runner sqlRunner, in engine.
 		if query == "" {
 			return nil, fmt.Errorf("%s query is required", dialect.Name)
 		}
-		args := sqlArgs(in, items, index)
+		args := sqlArgsForQuery(in, items, index, query, dialect)
 		if statements := sqlStatements(query); len(statements) > 1 {
 			argOffset := 0
 			for _, statement := range statements {
@@ -135,7 +135,7 @@ func sqlLegacyExecuteQuery(ctx context.Context, db *sql.DB, in engine.ExecuteInp
 	if query == "" {
 		return nil, fmt.Errorf("%s query is required", dialect.Name)
 	}
-	args := sqlArgs(in, items, 0)
+	args := sqlArgsForQuery(in, items, 0, query, dialect)
 	if sqlReturnsRows(query) {
 		rows, err := sqlQueryRows(ctx, db, query, args...)
 		if err != nil {
@@ -505,9 +505,17 @@ func sqlResultItem(result sql.Result) dataplane.Item {
 }
 
 func sqlArgs(in engine.ExecuteInput, items []dataplane.Item, index int) []any {
+	return sqlArgsWithExpected(in, items, index, 0)
+}
+
+func sqlArgsForQuery(in engine.ExecuteInput, items []dataplane.Item, index int, query string, dialect sqlDialect) []any {
+	return sqlArgsWithExpected(in, items, index, sqlPlaceholderCount(query, dialect))
+}
+
+func sqlArgsWithExpected(in engine.ExecuteInput, items []dataplane.Item, index int, expected int) []any {
 	options := sqlOptions(in.Node.Parameters)
 	if raw, ok := options["queryReplacement"]; ok {
-		if args := sqlArgsFromRaw(in, items, index, raw); len(args) > 0 {
+		if args := sqlArgsFromRawExpected(in, items, index, raw, expected); len(args) > 0 {
 			return args
 		}
 	}
@@ -515,10 +523,14 @@ func sqlArgs(in engine.ExecuteInput, items []dataplane.Item, index int) []any {
 	if !ok {
 		raw = in.Node.Parameters["parameters"]
 	}
-	return sqlArgsFromRaw(in, items, index, raw)
+	return sqlArgsFromRawExpected(in, items, index, raw, expected)
 }
 
 func sqlArgsFromRaw(in engine.ExecuteInput, items []dataplane.Item, index int, raw any) []any {
+	return sqlArgsFromRawExpected(in, items, index, raw, 0)
+}
+
+func sqlArgsFromRawExpected(in engine.ExecuteInput, items []dataplane.Item, index int, raw any, expected int) []any {
 	if object, ok := raw.(map[string]any); ok {
 		if values, ok := object["values"].([]any); ok {
 			raw = values
@@ -530,8 +542,14 @@ func sqlArgsFromRaw(in engine.ExecuteInput, items []dataplane.Item, index int, r
 	case nil:
 		return nil
 	case []any:
+		if expected == 1 {
+			return []any{resolveValue(in, items, index, values)}
+		}
 		return sqlResolveArgs(in, items, index, values)
 	case []string:
+		if expected == 1 {
+			return []any{resolveValue(in, items, index, values)}
+		}
 		args := make([]any, 0, len(values))
 		for _, value := range values {
 			args = append(args, resolveValue(in, items, index, value))
@@ -541,6 +559,9 @@ func sqlArgsFromRaw(in engine.ExecuteInput, items []dataplane.Item, index int, r
 		rawText := strings.TrimSpace(fmt.Sprint(resolveValue(in, items, index, values)))
 		if rawText == "" {
 			return nil
+		}
+		if expected == 1 && strings.HasPrefix(rawText, "[") && json.Valid([]byte(rawText)) {
+			return []any{rawText}
 		}
 		var decoded []any
 		if json.Unmarshal([]byte(rawText), &decoded) == nil {
@@ -973,6 +994,27 @@ func sqlStatementArgs(statement string, dialect sqlDialect, args []any, offset i
 		end = len(args)
 	}
 	return args[offset:end], end - offset
+}
+
+func sqlPlaceholderCount(query string, dialect sqlDialect) int {
+	if dialect.Name != "postgres" {
+		return strings.Count(query, "?")
+	}
+	maxPlaceholder := 0
+	for i := 0; i < len(query)-1; i++ {
+		if query[i] != '$' || query[i+1] < '0' || query[i+1] > '9' {
+			continue
+		}
+		value := 0
+		for i++; i < len(query) && query[i] >= '0' && query[i] <= '9'; i++ {
+			value = value*10 + int(query[i]-'0')
+		}
+		i--
+		if value > maxPlaceholder {
+			maxPlaceholder = value
+		}
+	}
+	return maxPlaceholder
 }
 
 func sqlIdent(value string, dialect sqlDialect) string {
