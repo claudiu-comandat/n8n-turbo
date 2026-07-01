@@ -78,6 +78,38 @@ func TestSQLExecuteQueryRunsMultipleStatementsWithQueryReplacement(t *testing.T)
 	}
 }
 
+func TestSQLStatementArgsForPostgresMultiStatementQuery(t *testing.T) {
+	t.Parallel()
+
+	args := []any{"order-1", `[{"sku":"sku-1","pret_total":12.34}]`}
+
+	deleteArgs, used := sqlStatementArgs(`DELETE FROM manifests.pallets WHERE orderid = $1`, postgresDialect, args, 0)
+	if used != 0 || !reflect.DeepEqual(deleteArgs, []any{"order-1"}) {
+		t.Fatalf("unexpected delete args: used=%d args=%#v", used, deleteArgs)
+	}
+
+	insertArgs, used := sqlStatementArgs(`INSERT INTO manifests.pallets SELECT $1::varchar, a FROM json_array_elements($2::json) AS a`, postgresDialect, args, 0)
+	if used != 0 || !reflect.DeepEqual(insertArgs, args) {
+		t.Fatalf("unexpected insert args: used=%d args=%#v", used, insertArgs)
+	}
+}
+
+func TestSQLQueryReplacementKeepsJSONArgumentTogether(t *testing.T) {
+	t.Parallel()
+
+	in := testInput(map[string]any{
+		"options": map[string]any{
+			"queryReplacement": `order-1, [{"sku":"sku-1","pret_total":12.34},{"sku":"sku-2","pret_total":56.78}]`,
+		},
+	}, []dataplane.Item{{JSON: map[string]any{}}})
+
+	args := sqlArgs(in, firstInput(in.InputData), 0)
+	want := []any{"order-1", `[{"sku":"sku-1","pret_total":12.34},{"sku":"sku-2","pret_total":56.78}]`}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("unexpected query args: %#v", args)
+	}
+}
+
 func TestSQLMissingOperationDefaultsToOfficialInsertWhenStructured(t *testing.T) {
 	t.Parallel()
 

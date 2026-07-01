@@ -383,13 +383,46 @@ func sqliteIdentList(values []string) string {
 }
 
 func splitCSV(value string) []string {
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
+	result := []string{}
+	start := 0
+	depth := 0
+	quote := rune(0)
+	escaped := false
+	for index, char := range value {
+		if escaped {
+			escaped = false
+			continue
 		}
+		if quote != 0 {
+			if char == '\\' {
+				escaped = true
+				continue
+			}
+			if char == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch char {
+		case '"', '\'':
+			quote = char
+		case '[', '{', '(':
+			depth++
+		case ']', '}', ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				if part := strings.TrimSpace(value[start:index]); part != "" {
+					result = append(result, part)
+				}
+				start = index + len(string(char))
+			}
+		}
+	}
+	if part := strings.TrimSpace(value[start:]); part != "" {
+		result = append(result, part)
 	}
 	return result
 }

@@ -92,11 +92,10 @@ func sqlExecuteQueryWithRunner(ctx context.Context, runner sqlRunner, in engine.
 		}
 		args := sqlArgs(in, items, index)
 		if statements := sqlStatements(query); len(statements) > 1 {
+			argOffset := 0
 			for _, statement := range statements {
-				statementArgs := []any(nil)
-				if sqlStatementUsesArgs(statement, dialect) {
-					statementArgs = args
-				}
+				statementArgs, usedArgs := sqlStatementArgs(statement, dialect, args, argOffset)
+				argOffset += usedArgs
 				if sqlReturnsRows(statement) {
 					rows, err := sqlQueryRowsWithRunner(ctx, runner, statement, statementArgs...)
 					if err != nil {
@@ -939,16 +938,41 @@ func sqlStatements(query string) []string {
 	return statements
 }
 
-func sqlStatementUsesArgs(statement string, dialect sqlDialect) bool {
+func sqlStatementArgs(statement string, dialect sqlDialect, args []any, offset int) ([]any, int) {
+	if len(args) == 0 {
+		return nil, 0
+	}
 	if dialect.Name == "postgres" {
+		maxPlaceholder := 0
 		for i := 0; i < len(statement)-1; i++ {
 			if statement[i] == '$' && statement[i+1] >= '0' && statement[i+1] <= '9' {
-				return true
+				value := 0
+				for i++; i < len(statement) && statement[i] >= '0' && statement[i] <= '9'; i++ {
+					value = value*10 + int(statement[i]-'0')
+				}
+				i--
+				if value > maxPlaceholder {
+					maxPlaceholder = value
+				}
 			}
 		}
-		return false
+		if maxPlaceholder == 0 {
+			return nil, 0
+		}
+		if maxPlaceholder > len(args) {
+			maxPlaceholder = len(args)
+		}
+		return args[:maxPlaceholder], 0
 	}
-	return strings.Contains(statement, "?")
+	count := strings.Count(statement, "?")
+	if count == 0 || offset >= len(args) {
+		return nil, 0
+	}
+	end := offset + count
+	if end > len(args) {
+		end = len(args)
+	}
+	return args[offset:end], end - offset
 }
 
 func sqlIdent(value string, dialect sqlDialect) string {
