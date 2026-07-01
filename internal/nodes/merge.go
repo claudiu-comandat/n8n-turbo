@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
@@ -44,7 +45,7 @@ func (Merge) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Out
 		return nil, ctx.Err()
 	default:
 	}
-	params := parseMergeParams(in.Node.Parameters)
+	params := parseMergeParams(in)
 	switch strings.ToLower(params.Mode) {
 	case "", "append":
 		return dataplane.MainOutput(mergeAppend(in.InputData)), nil
@@ -71,7 +72,8 @@ func (Merge) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Out
 	}
 }
 
-func parseMergeParams(raw map[string]any) mergeParams {
+func parseMergeParams(in engine.ExecuteInput) mergeParams {
+	raw := in.Node.Parameters
 	options := mergeObject(raw["options"])
 	mode := firstNonEmptyNode(stringParam(raw, "mode"), "append")
 	combineBy := firstNonEmptyNode(stringParam(raw, "combineBy"), "combineByFields")
@@ -85,7 +87,7 @@ func parseMergeParams(raw map[string]any) mergeParams {
 		OutputDataFrom:       firstNonEmptyNode(stringParam(raw, "outputDataFrom"), "both"),
 		ChooseBranchMode:     stringParam(raw, "chooseBranchMode"),
 		ChooseBranchOutput:   stringParam(raw, "output"),
-		ChooseBranchInput:    intParam(raw, "chooseBranchInput", intParam(raw, "input", intParam(raw, "useDataOfInput", 1)-1)),
+		ChooseBranchInput:    mergeChooseBranchInput(in),
 		ChooseBranchFallback: stringParam(raw, "chooseBranchFallback", "fallback"),
 		IncludeUnpaired:      boolParam(options, "includeUnpaired", boolParam(raw, "includeUnpaired", false)),
 		DisableDotNotation:   boolParam(options, "disableDotNotation", boolParam(raw, "disableDotNotation", false)),
@@ -96,6 +98,43 @@ func parseMergeParams(raw map[string]any) mergeParams {
 	}
 	params.FieldsToMatch = parseMergeFields(firstNonNil(raw["fieldsToMatch"], raw["mergeByFields"], raw["fields"], raw["matchingFields"], raw["fieldsToMatchString"]))
 	return params
+}
+
+func mergeChooseBranchInput(in engine.ExecuteInput) int {
+	raw := in.Node.Parameters
+	if _, ok := raw["chooseBranchInput"]; ok {
+		return intParam(raw, "chooseBranchInput", 0)
+	}
+	if _, ok := raw["input"]; ok {
+		return intParam(raw, "input", 0)
+	}
+	value, ok := raw["useDataOfInput"]
+	if !ok {
+		return 0
+	}
+	items := mergeInput(in.InputData, 0)
+	resolved := resolveValue(in, items, 0, value)
+	return intFromAny(resolved, 1) - 1
+}
+
+func intFromAny(value any, fallback int) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case int32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 func mergeResolveClash(raw map[string]any, options map[string]any) string {

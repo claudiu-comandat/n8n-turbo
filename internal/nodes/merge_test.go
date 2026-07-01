@@ -9,6 +9,7 @@ import (
 
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 	"github.com/n8n-io/n8n-turbo/internal/engine"
+	"github.com/n8n-io/n8n-turbo/internal/expr"
 	"github.com/n8n-io/n8n-turbo/internal/metadata"
 )
 
@@ -127,6 +128,32 @@ func TestMergeSupportsOfficialSQLQuery(t *testing.T) {
 	}
 	if len(output[0]) != 1 || output[0][0].JSON["left"] != "match" || output[0][0].JSON["right"] != "joined" {
 		t.Fatalf("unexpected output: %#v", output[0])
+	}
+}
+
+func TestMergeChooseBranchUsesExpressionInputNumber(t *testing.T) {
+	t.Parallel()
+
+	output, err := (Merge{}).Execute(context.Background(), engine.ExecuteInput{
+		Node: dataplane.Node{
+			Name: "Merge",
+			Type: "n8n-nodes-base.merge",
+			Parameters: map[string]any{
+				"mode":           "chooseBranch",
+				"useDataOfInput": "={{ 2 }}",
+			},
+		},
+		InputData: dataplane.Output{
+			{{JSON: map[string]any{"source": "input1"}}},
+			{{JSON: map[string]any{"source": "input2"}}},
+		},
+		Expr: expr.NewResolver(0),
+	})
+	if err != nil {
+		t.Fatalf("execute merge chooseBranch: %v", err)
+	}
+	if len(output[0]) != 1 || output[0][0].JSON["source"] != "input2" {
+		t.Fatalf("expected input 2 data, got %#v", output[0])
 	}
 }
 
