@@ -45,15 +45,11 @@ func TestLastSuccessfulExecutionUsesFrontendExecutionShape(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	rawData, ok := response.Data["data"].(string)
+	rawData, ok := response.Data["data"].(map[string]any)
 	if !ok {
-		t.Fatalf("execution data should use frontend flatted string shape, got %#v", response.Data["data"])
+		t.Fatalf("last successful execution data should be an object for RunData.vue, got %#v", response.Data["data"])
 	}
-	var root map[string]any
-	if err := json.Unmarshal([]byte(rawData), &root); err != nil {
-		t.Fatal(err)
-	}
-	resultData := root["resultData"].(map[string]any)
+	resultData := rawData["resultData"].(map[string]any)
 	if _, ok := resultData["runData"].(map[string]any); !ok {
 		t.Fatalf("resultData.runData missing: %#v", resultData)
 	}

@@ -250,7 +250,7 @@ func (s *Server) handleLastSuccessfulWorkflowExecution(w http.ResponseWriter, r 
 	}
 	for _, execution := range executions {
 		if execution.Status == "success" {
-			writeJSON(w, http.StatusOK, map[string]any{"data": executionResponse(execution)})
+			writeJSON(w, http.StatusOK, map[string]any{"data": lastSuccessfulExecutionResponse(execution)})
 			return
 		}
 	}
@@ -1027,6 +1027,27 @@ func executionResponse(execution persistence.ExecutionRow) map[string]any {
 		"retrySuccessId": execution.RetrySuccessID,
 	}
 	return response
+}
+
+func lastSuccessfulExecutionResponse(execution persistence.ExecutionRow) map[string]any {
+	response := executionResponse(execution)
+	response["data"] = executionDataObjectForFrontend(execution.Data)
+	return response
+}
+
+func executionDataObjectForFrontend(raw json.RawMessage) map[string]any {
+	if parsed, err := flatted.Parse(string(raw)); err == nil {
+		normalizeExecutionDataShape(parsed)
+		if root, ok := parsed.(map[string]any); ok {
+			return root
+		}
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		root = map[string]any{}
+	}
+	normalizeExecutionDataShape(root)
+	return root
 }
 
 func executionDataForFrontend(raw json.RawMessage) string {
