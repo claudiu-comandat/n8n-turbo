@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -688,6 +689,8 @@ type webhookPayload struct {
 	RawBody []byte
 }
 
+const webhookBodyLimit = 50 << 20
+
 func parseWebhookPayload(r *http.Request, path string, params map[string]string, optionSources ...map[string]any) (webhookPayload, error) {
 	rawBody, err := readWebhookRawBody(r)
 	if err != nil {
@@ -697,30 +700,34 @@ func parseWebhookPayload(r *http.Request, path string, params map[string]string,
 	if len(optionSources) > 0 {
 		options = webhookOptionsMap(optionSources[0])
 	}
-	body := parseWebhookBody(rawBody, r.Header.Get("Content-Type"))
+	body, binary := parseWebhookBodyAndBinary(rawBody, r.Header.Get("Content-Type"))
 	if boolParameter(options, "rawBody", false) {
 		body = string(rawBody)
 	}
-	item := dataplane.Item{JSON: map[string]any{
+	jsonBody := map[string]any{
 		"headers":     headerMap(r.Header),
 		"query":       queryMap(r),
 		"params":      stringMapAny(params),
 		"body":        body,
-		"rawBody":     string(rawBody),
 		"contentType": r.Header.Get("Content-Type"),
 		"clientIp":    webhookClientIP(r),
 		"receivedAt":  time.Now().UTC().Format(time.RFC3339Nano),
 		"httpMethod":  r.Method,
 		"path":        path,
-	}}
+	}
+	if boolParameter(options, "rawBody", false) {
+		jsonBody["rawBody"] = string(rawBody)
+	}
+	item := dataplane.Item{JSON: jsonBody, Binary: binary}
 	if boolParameter(options, "binaryData", false) {
 		property := firstNonEmpty(parameterText(options, "binaryPropertyName"), "data")
-		item.Binary = map[string]dataplane.Binary{
-			property: {
-				Data:     base64.StdEncoding.EncodeToString(rawBody),
-				MimeType: r.Header.Get("Content-Type"),
-				FileName: parameterText(options, "binaryFileName"),
-			},
+		if item.Binary == nil {
+			item.Binary = map[string]dataplane.Binary{}
+		}
+		item.Binary[property] = dataplane.Binary{
+			Data:     base64.StdEncoding.EncodeToString(rawBody),
+			MimeType: r.Header.Get("Content-Type"),
+			FileName: parameterText(options, "binaryFileName"),
 		}
 	}
 	return webhookPayload{Item: item, RawBody: rawBody}, nil
@@ -730,49 +737,58 @@ func readWebhookRawBody(r *http.Request) ([]byte, error) {
 	if r.Body == nil {
 		return nil, nil
 	}
-	bytes, err := io.ReadAll(io.LimitReader(r.Body, 16*1024*1024))
+	bytes, err := io.ReadAll(io.LimitReader(r.Body, webhookBodyLimit+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(bytes) > webhookBodyLimit {
+		return nil, fmt.Errorf("webhook body exceeds %d bytes", webhookBodyLimit)
 	}
 	return bytes, nil
 }
 
 func parseWebhookBody(bytes []byte, contentType string) any {
+	body, _ := parseWebhookBodyAndBinary(bytes, contentType)
+	return body
+}
+
+func parseWebhookBodyAndBinary(bytes []byte, contentType string) (any, map[string]dataplane.Binary) {
 	if len(bytes) == 0 {
-		return nil
+		return nil, nil
 	}
 	mediaType, params, _ := mime.ParseMediaType(contentType)
 	switch mediaType {
 	case "application/json", "application/vnd.api+json":
 		var decoded any
 		if json.Unmarshal(bytes, &decoded) == nil {
-			return decoded
+			return decoded, nil
 		}
 	case "application/x-www-form-urlencoded":
 		values, err := url.ParseQuery(string(bytes))
 		if err == nil {
-			return valuesToMap(values)
+			return valuesToMap(values), nil
 		}
 	case "multipart/form-data":
 		if boundary := params["boundary"]; boundary != "" {
-			if parsed, err := parseMultipart(bytes, boundary); err == nil {
-				return parsed
+			if parsed, binary, err := parseMultipart(bytes, boundary); err == nil {
+				return parsed, binary
 			}
 		}
 	}
 	var decoded any
 	if json.Unmarshal(bytes, &decoded) == nil {
-		return decoded
+		return decoded, nil
 	}
-	return string(bytes)
+	return string(bytes), nil
 }
 
-func parseMultipart(raw []byte, boundary string) (map[string]any, error) {
+func parseMultipart(raw []byte, boundary string) (map[string]any, map[string]dataplane.Binary, error) {
 	reader := multipart.NewReader(bytes.NewReader(raw), boundary)
 	form, err := reader.ReadForm(32 << 20)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	defer form.RemoveAll()
 	result := map[string]any{}
 	for key, values := range form.Value {
 		if len(values) == 1 {
@@ -782,17 +798,65 @@ func parseMultipart(raw []byte, boundary string) (map[string]any, error) {
 		}
 	}
 	files := map[string]any{}
+	binary := map[string]dataplane.Binary{}
 	for key, values := range form.File {
 		metadata := make([]map[string]any, 0, len(values))
-		for _, file := range values {
-			metadata = append(metadata, map[string]any{"filename": file.Filename, "size": file.Size, "contentType": file.Header.Get("Content-Type")})
+		for index, file := range values {
+			payload, err := multipartFileBytes(file)
+			if err != nil {
+				return nil, nil, err
+			}
+			name := uniqueBinaryName(binary, key, index)
+			mimeType := firstNonEmpty(file.Header.Get("Content-Type"), mime.TypeByExtension(strings.ToLower(filepath.Ext(file.Filename))), http.DetectContentType(payload))
+			extension := strings.TrimPrefix(filepath.Ext(file.Filename), ".")
+			binary[name] = dataplane.Binary{
+				Data:          base64.StdEncoding.EncodeToString(payload),
+				MimeType:      mimeType,
+				FileName:      file.Filename,
+				FileSize:      int64(len(payload)),
+				FileExtension: extension,
+			}
+			metadata = append(metadata, map[string]any{
+				"filename":       file.Filename,
+				"size":           int64(len(payload)),
+				"contentType":    mimeType,
+				"binaryProperty": name,
+			})
 		}
 		files[key] = metadata
 	}
 	if len(files) > 0 {
 		result["files"] = files
 	}
-	return result, nil
+	if len(binary) == 0 {
+		binary = nil
+	}
+	return result, binary, nil
+}
+
+func multipartFileBytes(file *multipart.FileHeader) ([]byte, error) {
+	stream, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	return io.ReadAll(stream)
+}
+
+func uniqueBinaryName(existing map[string]dataplane.Binary, key string, index int) string {
+	name := key
+	if index > 0 {
+		name = fmt.Sprintf("%s_%d", key, index)
+	}
+	if _, ok := existing[name]; !ok {
+		return name
+	}
+	for suffix := 1; ; suffix++ {
+		candidate := fmt.Sprintf("%s_%d", key, suffix)
+		if _, ok := existing[candidate]; !ok {
+			return candidate
+		}
+	}
 }
 
 func headerMap(headers http.Header) map[string]any {

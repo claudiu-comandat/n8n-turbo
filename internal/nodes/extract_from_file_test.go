@@ -145,6 +145,15 @@ func TestExtractFromFileAcceptsOfficialXLSAlias(t *testing.T) {
 	}
 }
 
+func TestReferencedBinaryPropertyName(t *testing.T) {
+	t.Parallel()
+
+	got := referencedBinaryPropertyName("={{ $input.item.binary.pdfFile }}")
+	if got != "pdfFile" {
+		t.Fatalf("referenced binary property = %q, want pdfFile", got)
+	}
+}
+
 func TestExtractFromFileAcceptsOfficialXMLAndRTFOperations(t *testing.T) {
 	t.Parallel()
 

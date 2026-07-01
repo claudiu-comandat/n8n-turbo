@@ -93,36 +93,46 @@ func (ExtractFromFile) Execute(ctx context.Context, in engine.ExecuteInput) (dat
 			return nil, ctx.Err()
 		default:
 		}
-		binary, ok := item.Binary[params.binaryProperty]
+		itemParams := params
+		binary, ok := item.Binary[itemParams.binaryProperty]
 		if !ok {
-			return nil, fmt.Errorf("extractFromFile: binary property %s not found", params.binaryProperty)
+			if property := referencedBinaryPropertyName(itemParams.binaryProperty); property != "" {
+				if resolved, exists := item.Binary[property]; exists {
+					itemParams.binaryProperty = property
+					binary = resolved
+					ok = true
+				}
+			}
 		}
-		operation := params.operation
+		if !ok {
+			return nil, fmt.Errorf("extractFromFile: binary property %s not found", itemParams.binaryProperty)
+		}
+		operation := itemParams.operation
 		if operation == "" || operation == "auto" {
 			operation = inferExtractOperation(binary)
 		}
 		operation = normalizeExtractOperation(operation)
-		if canUseLazyCSVExtraction(ctx, in, binary, operation, params) {
-			next, err := buildLazyCSVPlaceholder(ctx, in, item, itemIndex, binary, params)
+		if canUseLazyCSVExtraction(ctx, in, binary, operation, itemParams) {
+			next, err := buildLazyCSVPlaceholder(ctx, in, item, itemIndex, binary, itemParams)
 			if err != nil {
 				return nil, err
 			}
 			result = append(result, next)
 			continue
 		}
-		rows, err := extractBinaryDataStreaming(ctx, in.BinaryStore, binary, operation, params)
+		rows, err := extractBinaryDataStreaming(ctx, in.BinaryStore, binary, operation, itemParams)
 		if err != nil {
 			data, readErr := binarydata.Read(ctx, in.BinaryStore, binary)
 			if readErr != nil {
 				return nil, readErr
 			}
-			rows, err = extractBinaryData(ctx, data, operation, params, binary)
+			rows, err = extractBinaryData(ctx, data, operation, itemParams, binary)
 		}
 		if err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
-			result = append(result, extractedRowItem(item, itemIndex, row, params))
+			result = append(result, extractedRowItem(item, itemIndex, row, itemParams))
 		}
 	}
 	return dataplane.MainOutput(result), nil
@@ -390,6 +400,28 @@ func newExtractParams(params map[string]any) extractParams {
 		parsed.lineOutputField = "line"
 	}
 	return parsed
+}
+
+func referencedBinaryPropertyName(value string) string {
+	const marker = ".binary."
+	index := strings.Index(value, marker)
+	if index < 0 {
+		return ""
+	}
+	rest := value[index+len(marker):]
+	end := 0
+	for end < len(rest) {
+		char := rest[end]
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-' {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 func isExtractMoveToOperation(operation string) bool {
