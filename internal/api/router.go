@@ -168,6 +168,7 @@ func NewServer(
 	router.Use(server.rateLimit)
 	router.Get("/healthz", server.handleHealthz)
 	router.Get("/rest/n8n-turbo/version", server.handleTurboVersion)
+	router.Get("/schemas/*", server.handleNodeSchema)
 	router.Get("/metrics", server.handleMetrics)
 	router.With(auth.OptionalMiddleware(authService, cfg.Auth)).Get("/rest/login", server.handleCurrentLogin)
 	router.Post("/rest/login", server.handleLogin)
@@ -328,6 +329,11 @@ func (s *Server) handleTurboVersion(w http.ResponseWriter, r *http.Request) {
 			"assetCache":           "no-store",
 		},
 	})
+}
+
+func (s *Server) handleNodeSchema(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -931,7 +937,7 @@ func (w *gzipResponseWriter) Flush() {
 
 func (s *Server) rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.rateLimiter == nil {
+		if s.rateLimiter == nil || rateLimitExemptPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -945,6 +951,21 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func rateLimitExemptPath(path string) bool {
+	switch {
+	case path == "/healthz" || path == "/push" || path == "/rest/push":
+		return true
+	case strings.HasPrefix(path, "/assets/"):
+		return true
+	case strings.HasPrefix(path, "/static/"):
+		return true
+	case strings.HasPrefix(path, "/schemas/"):
+		return true
+	default:
+		return false
+	}
 }
 
 type rateLimiter struct {
