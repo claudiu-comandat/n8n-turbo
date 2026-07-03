@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -1224,13 +1227,17 @@ func executeGoCode(ctx context.Context, in engine.ExecuteInput) (dataplane.Outpu
 	if err != nil {
 		return nil, err
 	}
+	binPath, err := compileGoCode(ctx, goBin, source)
+	if err != nil {
+		return nil, err
+	}
 	timeout := codeTimeout(in.Node.Parameters)
 	mode := codeMode(in.Node.Parameters, in.Node.Type)
 	items := firstInput(in.InputData)
 	if mode == "runOnceForEachItem" {
 		output := make([]dataplane.Item, 0, len(items))
 		for index, item := range items {
-			result, err := runGo(ctx, goBin, timeout, source, items, item, index, in.Node)
+			result, err := runGo(ctx, binPath, timeout, items, item, index, in.Node)
 			if err != nil {
 				return nil, err
 			}
@@ -1248,32 +1255,75 @@ func executeGoCode(ctx context.Context, in engine.ExecuteInput) (dataplane.Outpu
 	if len(items) > 0 {
 		current = items[0]
 	}
-	result, err := runGo(ctx, goBin, timeout, source, items, current, 0, in.Node)
+	result, err := runGo(ctx, binPath, timeout, items, current, 0, in.Node)
 	if err != nil {
 		return nil, err
 	}
 	return dataplane.MainOutput(result), nil
 }
 
-func runGo(ctx context.Context, goBin string, timeout time.Duration, source string, items []dataplane.Item, item dataplane.Item, index int, node dataplane.Node) ([]dataplane.Item, error) {
+// compileGoCode builds the wrapped source once and caches the binary keyed by
+// the sha256 of the generated program, so repeated executions of the same Code
+// node skip the toolchain entirely.
+// ponytail: cache lives under os.TempDir with no eviction — it is wiped with the
+// container; add LRU cleanup only if snippet churn ever fills the disk.
+func compileGoCode(ctx context.Context, goBin, source string) (string, error) {
+	script := goScript(source)
+	sum := sha256.Sum256([]byte(script))
+	binName := hex.EncodeToString(sum[:])
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	cacheDir := filepath.Join(os.TempDir(), "n8n-turbo-go-bin")
+	binPath := filepath.Join(cacheDir, binName)
+	if info, err := os.Stat(binPath); err == nil && info.Mode().IsRegular() {
+		return binPath, nil
+	}
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", err
+	}
+	tempDir, err := os.MkdirTemp("", "n8n-turbo-go-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tempDir)
+	mainPath := filepath.Join(tempDir, "main.go")
+	if err := os.WriteFile(mainPath, []byte(script), 0600); err != nil {
+		return "", err
+	}
+	buildCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	tempBin := filepath.Join(tempDir, "code.bin")
+	cmd := exec.CommandContext(buildCtx, goBin, "build", "-o", tempBin, mainPath)
+	cmd.Dir = tempDir
+	cmd.Env = goEnvironment()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return "", fmt.Errorf("go code execution failed: %s", detail)
+	}
+	if err := os.Rename(tempBin, binPath); err != nil {
+		if _, statErr := os.Stat(binPath); statErr == nil {
+			return binPath, nil
+		}
+		return "", err
+	}
+	return binPath, nil
+}
+
+func runGo(ctx context.Context, binPath string, timeout time.Duration, items []dataplane.Item, item dataplane.Item, index int, node dataplane.Node) ([]dataplane.Item, error) {
 	payload := pythonPayload(items, item, index, node)
 	input, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	tempDir, err := os.MkdirTemp("", "n8n-turbo-go-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tempDir)
-	mainPath := filepath.Join(tempDir, "main.go")
-	if err := os.WriteFile(mainPath, []byte(goScript(source)), 0600); err != nil {
-		return nil, err
-	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(timeoutCtx, goBin, "run", mainPath)
-	cmd.Dir = tempDir
+	cmd := exec.CommandContext(timeoutCtx, binPath)
 	cmd.Env = goEnvironment()
 	cmd.Stdin = bytes.NewReader(input)
 	var stdout bytes.Buffer

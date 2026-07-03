@@ -20,6 +20,8 @@ ARG NODES_BASE_VERSION=2.16.0
 ARG LANGCHAIN_NODES_VERSION=2.16.1
 
 RUN apk add --no-cache ca-certificates tzdata curl go nodejs npm python3 poppler-utils ghostscript imagemagick
+# precompile the stdlib so the Code node's first go build only compiles the snippet
+RUN go build std
 WORKDIR /app
 COPY --from=go-builder /out/n8n-turbo /app/n8n-turbo
 COPY package.json package-lock.json /app/
