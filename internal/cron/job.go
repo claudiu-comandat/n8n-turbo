@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 )
@@ -53,6 +54,7 @@ func (j *Job) run(ctx context.Context) {
 	j.mu.Unlock()
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			log.Printf("cron: recovered panic in job %q: %v", j.id, recovered)
 			j.mu.Lock()
 			j.failCount++
 			j.mu.Unlock()

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	credpkg "github.com/n8n-io/n8n-turbo/internal/credentials"
+	"golang.org/x/sync/singleflight"
 )
 
 type nodeOAuth2CachedToken struct {
@@ -23,6 +24,8 @@ var nodeOAuth2Cache = struct {
 	sync.Mutex
 	tokens map[string]nodeOAuth2CachedToken
 }{tokens: map[string]nodeOAuth2CachedToken{}}
+
+var nodeOAuth2Fetch singleflight.Group
 
 func credentialByType(credentials map[string]map[string]any, names ...string) map[string]any {
 	for _, name := range names {
@@ -104,22 +107,38 @@ func nodeOAuth2ClientCredentialsToken(ctx context.Context, credential map[string
 	}
 	cred := nodeOAuth2Credential(credential)
 	key := nodeOAuth2CacheKey(cred)
-	nodeOAuth2Cache.Lock()
-	cached, ok := nodeOAuth2Cache.tokens[key]
-	if ok && time.Now().Add(60*time.Second).Before(cached.ExpiresAt) {
-		nodeOAuth2Cache.Unlock()
+	if cached, ok := nodeOAuth2CachedTokenFor(key); ok {
 		return cached.AccessToken, cached.TokenType, nil
 	}
-	nodeOAuth2Cache.Unlock()
-	token, err := cred.ClientCredentials(ctx, nodeOAuth2HTTPClient(cred))
+	result, err, _ := nodeOAuth2Fetch.Do(key, func() (any, error) {
+		if cached, ok := nodeOAuth2CachedTokenFor(key); ok {
+			return cached, nil
+		}
+		token, err := cred.ClientCredentials(ctx, nodeOAuth2HTTPClient(cred))
+		if err != nil {
+			return nodeOAuth2CachedToken{}, err
+		}
+		entry := nodeOAuth2CachedToken{AccessToken: token.AccessToken, TokenType: token.TokenType, ExpiresAt: credpkg.OAuth2ExpiresAt(token.ExpiresIn)}
+		nodeOAuth2Cache.Lock()
+		nodeOAuth2Cache.tokens[key] = entry
+		nodeOAuth2Cache.Unlock()
+		return entry, nil
+	})
 	if err != nil {
 		return "", "", err
 	}
-	expiresAt := credpkg.OAuth2ExpiresAt(token.ExpiresIn)
+	entry := result.(nodeOAuth2CachedToken)
+	return entry.AccessToken, entry.TokenType, nil
+}
+
+func nodeOAuth2CachedTokenFor(key string) (nodeOAuth2CachedToken, bool) {
 	nodeOAuth2Cache.Lock()
-	nodeOAuth2Cache.tokens[key] = nodeOAuth2CachedToken{AccessToken: token.AccessToken, TokenType: token.TokenType, ExpiresAt: expiresAt}
-	nodeOAuth2Cache.Unlock()
-	return token.AccessToken, token.TokenType, nil
+	defer nodeOAuth2Cache.Unlock()
+	cached, ok := nodeOAuth2Cache.tokens[key]
+	if ok && time.Now().Add(60*time.Second).Before(cached.ExpiresAt) {
+		return cached, true
+	}
+	return nodeOAuth2CachedToken{}, false
 }
 
 func nodeOAuth2Credential(credential map[string]any) credpkg.OAuth2Credential {

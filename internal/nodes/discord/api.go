@@ -13,48 +13,56 @@ import (
 
 func (n *Node) do(ctx context.Context, cred Credential, method string, path string, body any) (*http.Response, error) {
 	bucketID := method + ":" + path
-	if err := n.rateLimiter.Wait(ctx, bucketID); err != nil {
-		return nil, err
-	}
-	var reader io.Reader
+	var data []byte
 	if body != nil {
-		data, err := json.Marshal(body)
+		marshaled, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		reader = bytes.NewReader(data)
+		data = marshaled
 	}
-	request, err := http.NewRequestWithContext(ctx, method, n.baseURL+path, reader)
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Authorization", cred.AuthHeader())
-	request.Header.Set("User-Agent", "n8n-turbo")
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := n.client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	n.rateLimiter.Update(bucketID, response)
-	if response.StatusCode == http.StatusTooManyRequests {
-		defer response.Body.Close()
-		retryAfter := response.Header.Get("Retry-After")
-		waitSeconds, _ := strconv.ParseFloat(retryAfter, 64)
-		if waitSeconds <= 0 {
-			waitSeconds = 1
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := n.rateLimiter.Wait(ctx, bucketID); err != nil {
+			return nil, err
 		}
-		timer := time.NewTimer(time.Duration(waitSeconds * float64(time.Second)))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(data)
 		}
-		return n.do(ctx, cred, method, path, body)
+		request, err := http.NewRequestWithContext(ctx, method, n.baseURL+path, reader)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Authorization", cred.AuthHeader())
+		request.Header.Set("User-Agent", "n8n-turbo")
+		if body != nil {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		response, err := n.client.Do(request)
+		if err != nil {
+			return nil, err
+		}
+		n.rateLimiter.Update(bucketID, response)
+		if response.StatusCode == http.StatusTooManyRequests && attempt < maxAttempts-1 {
+			response.Body.Close()
+			retryAfter := response.Header.Get("Retry-After")
+			waitSeconds, _ := strconv.ParseFloat(retryAfter, 64)
+			if waitSeconds <= 0 {
+				waitSeconds = 1
+			}
+			timer := time.NewTimer(time.Duration(waitSeconds * float64(time.Second)))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
+		return response, nil
 	}
-	return response, nil
+	return nil, fmt.Errorf("discord: rate limited after %d attempts", maxAttempts)
 }
 
 func (n *Node) doJSON(ctx context.Context, cred Credential, method string, path string, body any) (map[string]any, error) {

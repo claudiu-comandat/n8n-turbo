@@ -34,6 +34,7 @@ import (
 	"github.com/n8n-io/n8n-turbo/internal/persistence"
 	"github.com/n8n-io/n8n-turbo/internal/push"
 	"github.com/n8n-io/n8n-turbo/internal/secrets"
+	"github.com/n8n-io/n8n-turbo/internal/webhook"
 )
 
 type Server struct {
@@ -49,6 +50,7 @@ type Server struct {
 	tagStore         persistence.TagStore
 	auditStore       persistence.AuditStore
 	insightsStore    persistence.InsightsStore
+	webhookStore     webhook.Store
 	registry         engine.Registry
 	evaluator        *engine.Evaluator
 	activeExecutions *engine.ActiveExecutions
@@ -82,6 +84,7 @@ func NewServer(
 	auditStore persistence.AuditStore,
 	insightsStore persistence.InsightsStore,
 	vault *credentials.Vault,
+	webhookStore webhook.Store,
 ) (*Server, error) {
 	if err := authServiceBootstrap(authService); err != nil {
 		return nil, err
@@ -111,6 +114,7 @@ func NewServer(
 		tagStore:        tagStore,
 		auditStore:      auditStore,
 		insightsStore:   insightsStore,
+		webhookStore:    webhookStore,
 		vault:           vault,
 		secretsManager:  secrets.NewManager(secrets.NewEnvProvider("")),
 		logStream:       logstream.New(1000),
@@ -1020,7 +1024,7 @@ func (r *rateLimiter) Take(key string) (bool, int, time.Duration) {
 	}
 	elapsed := now.Sub(bucket.lastRefill).Seconds()
 	if elapsed > 0 {
-		bucket.tokens = minFloat(r.burst, bucket.tokens+elapsed*r.refillRate)
+		bucket.tokens = min(r.burst, bucket.tokens+elapsed*r.refillRate)
 		bucket.lastRefill = now
 	}
 	bucket.lastSeen = now
@@ -1050,13 +1054,6 @@ func (r *rateLimiter) cleanup(now time.Time) {
 			delete(r.buckets, key)
 		}
 	}
-}
-
-func minFloat(a float64, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func (s *Server) logging(next http.Handler) http.Handler {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -62,8 +63,11 @@ func (s *Server) handleDeleteTag(w http.ResponseWriter, r *http.Request) {
 
 func writeStoreError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
-	if err == persistence.ErrNotFound {
+	switch {
+	case errors.Is(err, persistence.ErrNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, persistence.ErrVersionConflict):
+		status = http.StatusConflict
 	}
 	writeError(w, status, err.Error())
 }

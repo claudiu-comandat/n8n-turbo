@@ -140,7 +140,10 @@ func (s *Server) validateWaitingResumeAuth(r *http.Request, node dataplane.Node)
 			}
 		}
 	}
-	if !ok || expectedUser == "" || expectedPassword == "" || user != expectedUser || password != expectedPassword {
+	if !ok || expectedUser == "" || expectedPassword == "" {
+		return fmt.Errorf("invalid waiting basic auth")
+	}
+	if !hmac.Equal([]byte(user), []byte(expectedUser)) || !hmac.Equal([]byte(password), []byte(expectedPassword)) {
 		return fmt.Errorf("invalid waiting basic auth")
 	}
 	return nil

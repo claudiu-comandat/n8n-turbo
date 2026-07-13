@@ -112,11 +112,7 @@ func storeInlineBinary(ctx context.Context, store binarydata.Store, binary datap
 	mimeType := firstNonEmpty(binary.MimeType, "application/octet-stream")
 	fileName := firstNonEmpty(binary.FileName, "data.bin")
 	reader := base64.NewDecoder(base64.StdEncoding, strings.NewReader(binary.Data))
-	ref, err := store.Put(ctx, mimeType, fileName, reader)
-	if err == nil {
-		return ref, nil
-	}
-	return store.Put(ctx, mimeType, fileName, strings.NewReader(binary.Data))
+	return store.Put(ctx, mimeType, fileName, reader)
 }
 
 func firstNonEmpty(values ...string) string {

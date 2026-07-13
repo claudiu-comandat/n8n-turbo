@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -284,9 +283,8 @@ func (e *Evaluator) executeReadyBatch(ctx context.Context, workflow dataplane.Wo
 			startedAt := time.Now().UTC()
 			output, err := e.executeReadyNode(batchCtx, workflow, graph, executionID, mode, node, inputs[node.Name], runData, options)
 			results[index] = readyResult{Node: node, StartedAt: startedAt, Output: output, Err: err}
-			if err != nil && (isContextError(err) || node.EffectiveOnError() == dataplane.OnErrorStopWorkflow) {
-				cancel()
-			}
+			// No cancel() here: the scheduler loop stops the workflow after the batch;
+			// cancelling would abort unrelated sibling branches mid-flight.
 		}()
 	}
 	wg.Wait()
@@ -447,7 +445,7 @@ func executionStatusFromError(err error) string {
 	if _, ok := AsSuspendError(err); ok {
 		return "waiting"
 	}
-	if errors.Is(err, context.Canceled) {
+	if isContextError(err) {
 		return "canceled"
 	}
 	return "error"

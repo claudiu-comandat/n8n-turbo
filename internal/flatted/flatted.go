@@ -38,24 +38,6 @@ func Parse(s string) (any, error) {
 	return reconstruct(values, 0, cache, seen)
 }
 
-func parseLegacyRoot(raw []json.RawMessage) (any, error) {
-	var root string
-	if err := json.Unmarshal(raw[0], &root); err != nil {
-		return nil, fmt.Errorf("parse flatted root: %w", err)
-	}
-	rootIndex, err := strconv.Atoi(root)
-	if err != nil {
-		return nil, fmt.Errorf("parse flatted root index %q: %w", root, err)
-	}
-	values := raw[1:]
-	if rootIndex < 0 || rootIndex >= len(values) {
-		return nil, fmt.Errorf("parse flatted root index %d out of range", rootIndex)
-	}
-	cache := make([]any, len(values))
-	seen := make([]bool, len(values))
-	return reconstruct(values, rootIndex, cache, seen)
-}
-
 func SimpleParse(s string) (any, error) {
 	return Parse(s)
 }

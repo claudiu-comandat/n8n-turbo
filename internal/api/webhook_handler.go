@@ -21,6 +21,7 @@ import (
 
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 	"github.com/n8n-io/n8n-turbo/internal/engine"
+	"github.com/n8n-io/n8n-turbo/internal/persistence"
 )
 
 type webhookMatch struct {
@@ -627,31 +628,42 @@ func (s *Server) findFormWorkflow(r *http.Request, path string, isTest bool) (*w
 }
 
 func (s *Server) findHTTPTriggerWorkflow(r *http.Request, path string, isTest bool, nodeTypes map[string]bool, label string) (*webhookMatch, error) {
-	rows, err := s.workflowStore.List(r.Context(), 250)
-	if err != nil {
-		return nil, err
+	method := r.Method
+	if method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+		method = r.Header.Get("Access-Control-Request-Method")
 	}
-	for _, row := range rows {
-		if !row.Active && !isTest {
-			continue
+	// Fast path: the webhook index resolves production requests in O(1) and is
+	// validated against the live workflow. Parameterized paths, test webhooks, and
+	// index misses fall through to the full (uncapped) scan below.
+	if s.webhookStore != nil && !isTest {
+		if match, ok := s.lookupRegisteredWebhook(r.Context(), path, method, isTest, nodeTypes); ok {
+			return match, nil
+		}
+	}
+	var match *webhookMatch
+	if err := s.eachWorkflowRow(r.Context(), func(row persistence.WorkflowRow) {
+		if match != nil || (!row.Active && !isTest) {
+			return
 		}
 		workflow, err := workflowFromRow(&row)
 		if err != nil {
-			continue
+			return
 		}
 		for _, node := range workflow.Nodes {
 			if !nodeTypes[node.Type] || node.Disabled {
 				continue
 			}
-			method := r.Method
-			if method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
-				method = r.Header.Get("Access-Control-Request-Method")
-			}
 			params, ok := matchWebhookPath(webhookPath(node), path)
 			if ok && webhookMethod(node, method) {
-				return &webhookMatch{Workflow: workflow, Node: node, Params: params}, nil
+				match = &webhookMatch{Workflow: workflow, Node: node, Params: params}
+				return
 			}
 		}
+	}); err != nil {
+		return nil, err
+	}
+	if match != nil {
+		return match, nil
 	}
 	return nil, fmt.Errorf("%s %s %s not found", label, r.Method, path)
 }

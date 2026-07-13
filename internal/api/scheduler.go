@@ -64,6 +64,9 @@ func (s *Server) runtimeLoop(ctx context.Context) {
 	if err := s.syncScheduledWorkflows(ctx); err != nil {
 		log.Printf("sync scheduled workflows: %v", err)
 	}
+	if err := s.reconcileWebhookRegistry(ctx); err != nil {
+		log.Printf("reconcile webhook registry: %v", err)
+	}
 	if err := s.resumeDueWaitingExecutions(ctx, time.Now().UTC()); err != nil {
 		log.Printf("resume waiting executions: %v", err)
 	}
@@ -95,6 +98,9 @@ func (s *Server) runtimeLoop(ctx context.Context) {
 		case <-ticker.C:
 			if err := s.syncScheduledWorkflows(ctx); err != nil {
 				log.Printf("sync scheduled workflows: %v", err)
+			}
+			if err := s.reconcileWebhookRegistry(ctx); err != nil {
+				log.Printf("reconcile webhook registry: %v", err)
 			}
 			if err := s.resumeDueWaitingExecutions(ctx, time.Now().UTC()); err != nil {
 				log.Printf("resume waiting executions: %v", err)

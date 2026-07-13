@@ -170,7 +170,7 @@ func (s *Server) handleSaveWorkflow(w http.ResponseWriter, r *http.Request) {
 	user, _ := auth.UserFromContext(r.Context())
 	saved, err := s.workflowStore.Save(r.Context(), workflow, user.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	savedWorkflow, err := workflowFromRow(saved)

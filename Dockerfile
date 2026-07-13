@@ -1,15 +1,17 @@
+# syntax=docker/dockerfile:1
 FROM golang:1.25-alpine AS go-builder
 
 WORKDIR /src
 RUN apk add --no-cache ca-certificates git tzdata
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" -o /out/n8n-turbo ./cmd/n8n-turbo
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" -o /out/n8n-turbo ./cmd/n8n-turbo
 
 FROM alpine:3.22 AS runtime
 ARG VERSION=dev
@@ -20,8 +22,9 @@ ARG NODES_BASE_VERSION=2.16.0
 ARG LANGCHAIN_NODES_VERSION=2.16.1
 
 RUN apk add --no-cache ca-certificates tzdata curl go nodejs npm python3 poppler-utils ghostscript imagemagick
+# precompile the stdlib so the Code node's first go build only compiles the snippet
+RUN go build std
 WORKDIR /app
-COPY --from=go-builder /out/n8n-turbo /app/n8n-turbo
 COPY package.json package-lock.json /app/
 RUN npm ci --omit=dev --ignore-scripts
 RUN mkdir -p /app/ui \
@@ -35,6 +38,7 @@ RUN mkdir -p /app/ui \
 	&& curl -fsSL "https://registry.npmjs.org/@n8n/n8n-nodes-langchain/-/n8n-nodes-langchain-${LANGCHAIN_NODES_VERSION}.tgz" | tar -xz -C /tmp \
 	&& cp -R /tmp/package/dist /app/ui/icons/@n8n/n8n-nodes-langchain/dist \
 	&& rm -rf /tmp/package
+COPY --from=go-builder /out/n8n-turbo /app/n8n-turbo
 RUN mkdir -p /app/data /app/logs /app/storage/binary
 EXPOSE 5678
 ENV N8N_HOST=0.0.0.0
@@ -57,5 +61,5 @@ ENV N8N_CONCURRENCY_PRODUCTION_LIMIT=0
 ENV N8N_TURBO_BUILD=${COMMIT}
 ENV N8N_TURBO_VERSION=${VERSION}
 ENV N8N_TURBO_BUILD_DATE=${BUILD_DATE}
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 CMD curl -fsS http://127.0.0.1:5678/healthz || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --start-interval=2s --retries=3 CMD curl -fsS http://127.0.0.1:5678/healthz || exit 1
 ENTRYPOINT ["/app/n8n-turbo"]

@@ -58,8 +58,14 @@ func NewProvider(ctx context.Context, cfg Config) (*Provider, error) {
 }
 
 func (p *Provider) AuthURL(state string) string {
+	now := time.Now().UTC()
 	p.mu.Lock()
-	p.states[state] = time.Now().UTC().Add(10 * time.Minute)
+	for key, expiry := range p.states {
+		if now.After(expiry) {
+			delete(p.states, key)
+		}
+	}
+	p.states[state] = now.Add(10 * time.Minute)
 	p.mu.Unlock()
 	values := url.Values{}
 	values.Set("client_id", p.config.ClientID)

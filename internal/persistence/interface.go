@@ -13,6 +13,8 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+var ErrVersionConflict = errors.New("version conflict")
+
 type UserRow struct {
 	ID        string    `json:"id"`
 	Email     string    `json:"email"`
