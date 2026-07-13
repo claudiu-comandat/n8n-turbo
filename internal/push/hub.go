@@ -118,8 +118,9 @@ func (h *Hub) publish(message Message, target BroadcastTarget) {
 	if err != nil {
 		return
 	}
+	// Send inside the RLock so add()/remove() can't close client.send mid-send (would panic).
+	var stale []*Client
 	h.mu.RLock()
-	clients := make([]*Client, 0, len(h.clients))
 	for _, client := range h.clients {
 		if target.UserID != "" && client.UserID != target.UserID {
 			continue
@@ -130,15 +131,15 @@ func (h *Hub) publish(message Message, target BroadcastTarget) {
 		if target.ExecutionID != "" && !client.executionSubs[target.ExecutionID] {
 			continue
 		}
-		clients = append(clients, client)
-	}
-	h.mu.RUnlock()
-	for _, client := range clients {
 		select {
 		case client.send <- payload:
 		default:
-			h.remove(client)
+			stale = append(stale, client)
 		}
+	}
+	h.mu.RUnlock()
+	for _, client := range stale {
+		h.remove(client)
 	}
 }
 

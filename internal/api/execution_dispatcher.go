@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
@@ -26,6 +27,7 @@ type executionDispatcher struct {
 	pending     sync.Map
 	startOnce   sync.Once
 	stopOnce    sync.Once
+	stopped     atomic.Bool
 	done        chan error
 }
 
@@ -137,6 +139,7 @@ func (d *executionDispatcher) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	d.stopped.Store(true)
 	var err error
 	d.stopOnce.Do(func() {
 		if closeErr := d.distributor.Close(); closeErr != nil {
@@ -188,6 +191,9 @@ func (d *executionDispatcher) Submit(ctx context.Context, request executionDispa
 	}
 	if request.Done == nil {
 		request.Done = make(chan executionDispatchResult, 1)
+	}
+	if d.stopped.Load() {
+		return fmt.Errorf("execution dispatcher is shutting down")
 	}
 	dispatchPayload := dispatchPayloadFromRequest(request)
 	payload, err := json.Marshal(dispatchPayload)
@@ -268,6 +274,14 @@ func (s *Server) executeWorkflowDirect(ctx context.Context, request executionDis
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Idempotency guard: if this execution already reached a terminal state (e.g. a
+	// reclaimed job whose original run finished before it could be acknowledged),
+	// don't run it again and repeat its side effects.
+	if request.ExecutionID != "" {
+		if row, err := s.executionStore.GetByID(ctx, request.ExecutionID); err == nil && row != nil && isTerminalExecutionStatus(row.Status) {
+			return executionDispatchResult{Status: row.Status}
+		}
+	}
 	request.Options = s.hydrateExecutionOptions(request.Options)
 	baseCtx, cancelExecution := s.executionContext(ctx)
 	defer cancelExecution()
@@ -337,6 +351,15 @@ func (s *Server) executeWorkflowDirect(ctx context.Context, request executionDis
 		s.launchErrorWorkflow(context.Background(), request, result, executionError)
 	}
 	return executionDispatchResult{Result: result, Status: status, RunErr: runErr, StoreErr: storeErr}
+}
+
+func isTerminalExecutionStatus(status string) bool {
+	switch status {
+	case "success", "error", "crashed":
+		return true
+	default:
+		return false
+	}
 }
 
 func dispatchPayloadFromRequest(request executionDispatchRequest) executionDispatchPayload {

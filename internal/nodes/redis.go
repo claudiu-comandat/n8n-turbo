@@ -75,18 +75,10 @@ func (c *redisClientCache) GetOrCreate(ctx context.Context, credential redisCred
 		entry.lastUsed = time.Now().UTC()
 		client := entry.client
 		c.mu.Unlock()
-		pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		if err := client.Ping(pingCtx).Err(); err == nil {
-			return client, nil
-		}
-		_ = client.Close()
-		c.mu.Lock()
-		delete(c.clients, hash)
-		c.mu.Unlock()
-	} else {
-		c.mu.Unlock()
+		// Return the shared pool as-is; don't Close it here (other goroutines use it).
+		return client, nil
 	}
+	c.mu.Unlock()
 	client := buildRedisClient(credential)
 	if err := client.Ping(ctx).Err(); err != nil {
 		_ = client.Close()

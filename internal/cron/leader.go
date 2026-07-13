@@ -44,7 +44,22 @@ func NewRedisLeader(config RedisLeaderConfig) *RedisLeader {
 	if config.RenewInterval > 0 {
 		leader.interval = config.RenewInterval
 	}
+	leader.interval = clampRenewInterval(leader.interval, leader.ttl)
 	return leader
+}
+
+// Cap at ttl/3 so callTimeout stays positive and a stalled renewal drops leadership in time.
+func clampRenewInterval(interval, ttl time.Duration) time.Duration {
+	if interval <= 0 {
+		interval = ttl / 3
+	}
+	if max := ttl / 3; max > 0 && interval > max {
+		interval = max
+	}
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	return interval
 }
 
 func NewRedisLeaderWithClient(client *redis.Client, key string, instanceID string, ttl time.Duration) *RedisLeader {
@@ -61,6 +76,7 @@ func NewRedisLeaderWithClient(client *redis.Client, key string, instanceID strin
 	if interval < 100*time.Millisecond {
 		interval = 100 * time.Millisecond
 	}
+	interval = clampRenewInterval(interval, ttl)
 	return &RedisLeader{client: client, key: key, instanceID: instanceID, ttl: ttl, interval: interval}
 }
 
@@ -132,6 +148,11 @@ func (l *RedisLeader) run(ctx context.Context, done chan<- struct{}) {
 }
 
 func (l *RedisLeader) tryAcquire(ctx context.Context) {
+	if timeout := l.callTimeout(); timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	ok, err := l.client.SetNX(ctx, l.key, l.instanceID, l.ttl).Result()
 	if err != nil {
 		l.leader.Store(false)
@@ -152,6 +173,14 @@ func (l *RedisLeader) tryAcquire(ctx context.Context) {
 	}
 	renewed, err := redisRenewLeader.Run(ctx, l.client, []string{l.key}, l.instanceID, int64(l.ttl/time.Millisecond)).Bool()
 	l.leader.Store(err == nil && renewed)
+}
+
+func (l *RedisLeader) callTimeout() time.Duration {
+	timeout := l.ttl - 2*l.interval
+	if timeout <= 0 {
+		timeout = l.ttl / 2
+	}
+	return timeout
 }
 
 func (l *RedisLeader) release(ctx context.Context) error {

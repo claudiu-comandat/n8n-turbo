@@ -115,18 +115,10 @@ func (c *mongoClientCache) GetOrCreate(ctx context.Context, cred mongoCredential
 		entry.lastUsed = time.Now().UTC()
 		client := entry.client
 		c.mu.Unlock()
-		pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		if err := client.Ping(pingCtx, readpref.Primary()); err == nil {
-			return client, nil
-		}
-		_ = client.Disconnect(ctx)
-		c.mu.Lock()
-		delete(c.clients, hash)
-		c.mu.Unlock()
-	} else {
-		c.mu.Unlock()
+		// Return the shared pool as-is; don't Disconnect it here (other goroutines use it).
+		return client, nil
 	}
+	c.mu.Unlock()
 	client, err := buildMongoClient(ctx, cred)
 	if err != nil {
 		return nil, err

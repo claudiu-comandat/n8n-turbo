@@ -7,11 +7,15 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 	"github.com/n8n-io/n8n-turbo/internal/engine"
 	_ "modernc.org/sqlite"
 )
+
+// Unique in-memory DB name per execution (shared cache would leak data across executions).
+var sqliteMemSeq atomic.Uint64
 
 type SQLite struct{}
 
@@ -57,7 +61,7 @@ func (SQLite) Execute(ctx context.Context, in engine.ExecuteInput) (dataplane.Ou
 
 func sqliteDSN(path string, readOnly bool) string {
 	if path == ":memory:" {
-		return "file::memory:?cache=shared"
+		return fmt.Sprintf("file:n8n-mem-%d?mode=memory&cache=shared", sqliteMemSeq.Add(1))
 	}
 	if strings.HasPrefix(path, "file:") {
 		return path
@@ -117,11 +121,10 @@ func sqliteExecuteQueryWithRunner(ctx context.Context, runner sqliteRunner, in e
 			output = append(output, rows...)
 			continue
 		}
-		result, err := runner.ExecContext(ctx, query, args...)
-		if err != nil {
+		if _, err := runner.ExecContext(ctx, query, args...); err != nil {
 			return nil, err
 		}
-		output = append(output, sqliteResultItem(result))
+		output = append(output, dataplane.Item{JSON: map[string]any{"success": true}})
 	}
 	return dataplane.MainOutput(output), nil
 }

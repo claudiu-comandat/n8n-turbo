@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,14 +16,17 @@ import (
 )
 
 type RedisConfig struct {
-	StreamKey     string
-	GroupName     string
-	ConsumerID    string
-	ResultStream  string
-	DeadLetterKey string
-	Block         time.Duration
-	BatchSize     int64
-	CloseClient   bool
+	StreamKey         string
+	GroupName         string
+	ConsumerID        string
+	ResultStream      string
+	DeadLetterKey     string
+	Block             time.Duration
+	BatchSize         int64
+	KeepaliveInterval time.Duration
+	ReclaimInterval   time.Duration
+	ReclaimMinIdle    time.Duration
+	CloseClient       bool
 }
 
 type RedisDistributor struct {
@@ -30,6 +34,7 @@ type RedisDistributor struct {
 	cfg    RedisConfig
 	active sync.Map
 	closed atomic.Bool
+	done   chan struct{}
 }
 
 type redisActiveJob struct {
@@ -42,11 +47,13 @@ func NewRedisDistributor(client *redis.Client, cfg RedisConfig) (*RedisDistribut
 		return nil, fmt.Errorf("redis client is required")
 	}
 	cfg = normalizeRedisConfig(cfg)
-	distributor := &RedisDistributor{client: client, cfg: cfg}
+	distributor := &RedisDistributor{client: client, cfg: cfg, done: make(chan struct{})}
 	err := client.XGroupCreateMkStream(context.Background(), cfg.StreamKey, cfg.GroupName, "0").Err()
 	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
 		return nil, fmt.Errorf("create redis consumer group: %w", err)
 	}
+	go distributor.keepaliveLoop()
+	go distributor.reapLoop()
 	return distributor, nil
 }
 
@@ -147,15 +154,16 @@ func (d *RedisDistributor) Acknowledge(ctx context.Context, jobID string, result
 	if err != nil {
 		return err
 	}
+	// Publish the result, ack, and delete atomically so a crash between them
+	// can't leave the entry stuck pending after its result was already emitted.
+	pipe := d.client.TxPipeline()
 	if d.cfg.ResultStream != "" {
-		if err := d.client.XAdd(ctx, &redis.XAddArgs{Stream: d.cfg.ResultStream, Values: map[string]any{"result": string(data), "jobId": result.JobID, "workflowId": result.WorkflowID}}).Err(); err != nil {
-			return err
-		}
+		pipe.XAdd(ctx, &redis.XAddArgs{Stream: d.cfg.ResultStream, Values: map[string]any{"result": string(data), "jobId": result.JobID, "workflowId": result.WorkflowID}})
 	}
-	if err := d.client.XAck(ctx, d.cfg.StreamKey, d.cfg.GroupName, entry.streamID).Err(); err != nil {
-		return err
-	}
-	return d.client.XDel(ctx, d.cfg.StreamKey, entry.streamID).Err()
+	pipe.XAck(ctx, d.cfg.StreamKey, d.cfg.GroupName, entry.streamID)
+	pipe.XDel(ctx, d.cfg.StreamKey, entry.streamID)
+	_, err = pipe.Exec(ctx)
+	return err
 }
 
 func (d *RedisDistributor) Nack(ctx context.Context, jobID string, reason string) error {
@@ -177,17 +185,16 @@ func (d *RedisDistributor) Nack(ctx context.Context, jobID string, reason string
 	if err != nil {
 		return err
 	}
+	pipe := d.client.TxPipeline()
 	if d.cfg.DeadLetterKey != "" {
-		if err := d.client.XAdd(ctx, &redis.XAddArgs{Stream: d.cfg.DeadLetterKey, Values: map[string]any{"job": string(data), "jobId": job.ID, "reason": reason}}).Err(); err != nil {
-			return err
-		}
+		pipe.XAdd(ctx, &redis.XAddArgs{Stream: d.cfg.DeadLetterKey, Values: map[string]any{"job": string(data), "jobId": job.ID, "reason": reason}})
 	}
-	if err := d.client.XAck(ctx, d.cfg.StreamKey, d.cfg.GroupName, entry.streamID).Err(); err != nil {
+	pipe.XAck(ctx, d.cfg.StreamKey, d.cfg.GroupName, entry.streamID)
+	pipe.XDel(ctx, d.cfg.StreamKey, entry.streamID)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return err
 	}
-	if err := d.client.XDel(ctx, d.cfg.StreamKey, entry.streamID).Err(); err != nil {
-		return err
-	}
+	// Immediate/durable requeue on purpose: a deferred in-memory retry would widen the crash-loss window.
 	return d.Enqueue(ctx, job)
 }
 
@@ -204,28 +211,43 @@ func (d *RedisDistributor) Pending(ctx context.Context) ([]Job, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	messages, err := d.client.XRangeN(ctx, d.cfg.StreamKey, "-", "+", 250).Result()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return []Job{}, nil
-		}
-		return nil, err
-	}
 	activeStreamIDs := map[string]bool{}
 	d.active.Range(func(key any, value any) bool {
 		activeStreamIDs[value.(redisActiveJob).streamID] = true
 		return true
 	})
+	// Inclusive cursor (any Redis version); skip the boundary entry each next page.
+	const pageSize = 500
 	jobs := []Job{}
-	for _, message := range messages {
-		if activeStreamIDs[message.ID] {
-			continue
-		}
-		job, err := redisJobFromMessage(message)
+	start := "-"
+	for {
+		messages, err := d.client.XRangeN(ctx, d.cfg.StreamKey, start, "+", pageSize).Result()
 		if err != nil {
-			continue
+			if errors.Is(err, redis.Nil) {
+				break
+			}
+			return nil, err
 		}
-		jobs = append(jobs, job)
+		if len(messages) == 0 {
+			break
+		}
+		for i, message := range messages {
+			if start != "-" && i == 0 {
+				continue // boundary entry already counted on the previous page
+			}
+			if activeStreamIDs[message.ID] {
+				continue
+			}
+			job, err := redisJobFromMessage(message)
+			if err != nil {
+				continue
+			}
+			jobs = append(jobs, job)
+		}
+		if len(messages) < pageSize {
+			break
+		}
+		start = messages[len(messages)-1].ID // inclusive; boundary skipped next page
 	}
 	return jobs, nil
 }
@@ -274,10 +296,125 @@ func (d *RedisDistributor) Close() error {
 	if !d.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	close(d.done)
 	if d.cfg.CloseClient {
 		return d.client.Close()
 	}
 	return nil
+}
+
+// keepaliveLoop refreshes this instance's in-flight entries so another instance's
+// reaper never mistakes an actively-processing job for an abandoned one.
+func (d *RedisDistributor) keepaliveLoop() {
+	ticker := time.NewTicker(d.cfg.KeepaliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.done:
+			return
+		case <-ticker.C:
+			d.refreshActive()
+		}
+	}
+}
+
+func (d *RedisDistributor) refreshActive() {
+	ids := []string{}
+	d.active.Range(func(_ any, value any) bool {
+		ids = append(ids, value.(redisActiveJob).streamID)
+		return true
+	})
+	if len(ids) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.KeepaliveInterval)
+	defer cancel()
+	// Reclaim our own entries to ourselves with min-idle 0 to reset their idle
+	// time (a liveness heartbeat); JustID avoids fetching the payloads.
+	_ = d.client.XClaimJustID(ctx, &redis.XClaimArgs{
+		Stream:   d.cfg.StreamKey,
+		Group:    d.cfg.GroupName,
+		Consumer: d.cfg.ConsumerID,
+		MinIdle:  0,
+		Messages: ids,
+	}).Err()
+}
+
+// reapLoop re-enqueues jobs whose owning consumer died (their PEL entry went idle
+// past ReclaimMinIdle), so a crashed instance's in-flight work isn't lost.
+func (d *RedisDistributor) reapLoop() {
+	ticker := time.NewTicker(d.cfg.ReclaimInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.done:
+			return
+		case <-ticker.C:
+			d.reclaimAbandoned()
+		}
+	}
+}
+
+func (d *RedisDistributor) reclaimAbandoned() {
+	own := map[string]bool{}
+	d.active.Range(func(_ any, value any) bool {
+		own[value.(redisActiveJob).streamID] = true
+		return true
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.ReclaimInterval)
+	defer cancel()
+	start := "0-0"
+	for {
+		messages, next, err := d.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+			Stream:   d.cfg.StreamKey,
+			Group:    d.cfg.GroupName,
+			Consumer: d.cfg.ConsumerID,
+			MinIdle:  d.cfg.ReclaimMinIdle,
+			Start:    start,
+			Count:    100,
+		}).Result()
+		if err != nil {
+			return
+		}
+		for _, message := range messages {
+			if own[message.ID] {
+				continue // still processing on this instance; leave it be
+			}
+			d.recoverAbandoned(ctx, message)
+		}
+		if next == "" || next == "0-0" || len(messages) == 0 {
+			return
+		}
+		start = next
+	}
+}
+
+func (d *RedisDistributor) recoverAbandoned(ctx context.Context, message redis.XMessage) {
+	job, err := redisJobFromMessage(message)
+	if err != nil {
+		// Unparseable entry: drop it so it isn't reclaimed forever.
+		pipe := d.client.TxPipeline()
+		pipe.XAck(ctx, d.cfg.StreamKey, d.cfg.GroupName, message.ID)
+		pipe.XDel(ctx, d.cfg.StreamKey, message.ID)
+		if _, err := pipe.Exec(ctx); err != nil {
+			log.Printf("redis distributor: drop poison entry %s: %v", message.ID, err)
+		}
+		return
+	}
+	data, err := json.Marshal(normalizeJob(job))
+	if err != nil {
+		return
+	}
+	// Re-enqueue a fresh entry and remove the abandoned one atomically (MULTI/EXEC),
+	// so a failed recovery leaves the entry pending for a later retry rather than
+	// dropping the job or creating a duplicate.
+	pipe := d.client.TxPipeline()
+	pipe.XAdd(ctx, &redis.XAddArgs{Stream: d.cfg.StreamKey, Values: map[string]any{"job": string(data), "jobId": job.ID, "workflowId": job.WorkflowID, "priority": job.Priority}})
+	pipe.XAck(ctx, d.cfg.StreamKey, d.cfg.GroupName, message.ID)
+	pipe.XDel(ctx, d.cfg.StreamKey, message.ID)
+	if _, err := pipe.Exec(ctx); err != nil {
+		log.Printf("redis distributor: recover job %s: %v", job.ID, err)
+	}
 }
 
 func normalizeRedisConfig(cfg RedisConfig) RedisConfig {
@@ -301,6 +438,20 @@ func normalizeRedisConfig(cfg RedisConfig) RedisConfig {
 	}
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 1
+	}
+	if cfg.KeepaliveInterval <= 0 {
+		cfg.KeepaliveInterval = 15 * time.Second
+	}
+	if cfg.ReclaimInterval <= 0 {
+		cfg.ReclaimInterval = 30 * time.Second
+	}
+	if cfg.ReclaimMinIdle <= 0 {
+		cfg.ReclaimMinIdle = 60 * time.Second
+	}
+	// The reclaim threshold must exceed the keepalive window, or a live job
+	// (refreshed every KeepaliveInterval) could be reclaimed and run twice.
+	if min := 3 * cfg.KeepaliveInterval; cfg.ReclaimMinIdle < min {
+		cfg.ReclaimMinIdle = min
 	}
 	return cfg
 }

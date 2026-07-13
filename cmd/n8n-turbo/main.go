@@ -19,6 +19,7 @@ import (
 	"github.com/n8n-io/n8n-turbo/internal/migration"
 	"github.com/n8n-io/n8n-turbo/internal/persistence/postgres"
 	"github.com/n8n-io/n8n-turbo/internal/persistence/sqlite"
+	"github.com/n8n-io/n8n-turbo/internal/webhook"
 )
 
 func main() {
@@ -90,9 +91,14 @@ func main() {
 	}
 	insightsStore := sqlite.NewInsightsStore(db)
 
+	webhookStore, err := webhook.NewSQLiteStore(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	authService := auth.NewService(userStore, cfg.EncryptionKey, cfg.Auth)
 
-	server, err := api.NewServer(cfg, authService, userStore, settingsStore, workflowStore, executionStore, credentialStore, variableStore, tagStore, auditStore, insightsStore, vault)
+	server, err := api.NewServer(cfg, authService, userStore, settingsStore, workflowStore, executionStore, credentialStore, variableStore, tagStore, auditStore, insightsStore, vault, webhookStore)
 	if err != nil {
 		log.Fatal(err)
 	}

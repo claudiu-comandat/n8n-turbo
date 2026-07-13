@@ -49,24 +49,65 @@ func (s *ExecutionStore) Init(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init execution tables: %w", err)
 	}
-	for _, statement := range []string{
-		`ALTER TABLE execution_entity ADD COLUMN finished INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE execution_entity ADD COLUMN retry_of TEXT`,
-		`ALTER TABLE execution_entity ADD COLUMN retry_success_id TEXT`,
-		`ALTER TABLE execution_entity ADD COLUMN wait_till TEXT`,
-		`ALTER TABLE execution_entity ADD COLUMN deleted_at TEXT`,
-		`ALTER TABLE execution_entity ADD COLUMN custom_data TEXT NOT NULL DEFAULT '{}'`,
+	// Add columns older databases may lack, surfacing real ALTER errors.
+	existing, err := s.tableColumns(ctx, "execution_entity")
+	if err != nil {
+		return fmt.Errorf("inspect execution schema: %w", err)
+	}
+	for _, column := range []struct{ name, ddl string }{
+		{"finished", `ADD COLUMN finished INTEGER NOT NULL DEFAULT 0`},
+		{"retry_of", `ADD COLUMN retry_of TEXT`},
+		{"retry_success_id", `ADD COLUMN retry_success_id TEXT`},
+		{"wait_till", `ADD COLUMN wait_till TEXT`},
+		{"deleted_at", `ADD COLUMN deleted_at TEXT`},
+		{"custom_data", `ADD COLUMN custom_data TEXT NOT NULL DEFAULT '{}'`},
 	} {
-		_, _ = s.db.ExecContext(ctx, statement)
+		if existing[column.name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE execution_entity "+column.ddl); err != nil {
+			return fmt.Errorf("add execution column %s: %w", column.name, err)
+		}
 	}
 	return nil
+}
+
+func (s *ExecutionStore) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid          int
+			name, ctype  string
+			notnull, pk  int
+			defaultValue sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 func (s *ExecutionStore) Create(ctx context.Context, workflow dataplane.Workflow, mode string) (*persistence.ExecutionRow, error) {
 	id := newID()
 	now := time.Now().UTC()
 	workflowData := mustJSON(workflow, "{}")
-	_, err := s.db.ExecContext(ctx, `
+	initialData, err := flattedExecutionData(dataplane.RunExecutionData{})
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create execution: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO execution_entity (id, workflow_id, finished, status, mode, started_at, created_at, custom_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
@@ -77,19 +118,16 @@ func (s *ExecutionStore) Create(ctx context.Context, workflow dataplane.Workflow
 		now.Format(time.RFC3339Nano),
 		now.Format(time.RFC3339Nano),
 		"{}",
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("create execution: %w", err)
 	}
-	initialData, err := flattedExecutionData(dataplane.RunExecutionData{})
-	if err != nil {
-		return nil, err
-	}
-	_, err = s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO execution_data (execution_id, workflow_data, data)
-		VALUES (?, ?, ?)`, id, workflowData, initialData)
-	if err != nil {
+		VALUES (?, ?, ?)`, id, workflowData, initialData); err != nil {
 		return nil, fmt.Errorf("create execution data: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("create execution: %w", err)
 	}
 	return s.GetByID(ctx, id)
 }
@@ -99,7 +137,12 @@ func (s *ExecutionStore) Finish(ctx context.Context, id string, status string, s
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE execution_entity SET status = ?, finished = 1, stopped_at = ?, wait_till = NULL WHERE id = ? AND deleted_at IS NULL`, status, stoppedAt.UTC().Format(time.RFC3339Nano), id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("finish execution: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE execution_entity SET status = ?, finished = 1, stopped_at = ?, wait_till = NULL WHERE id = ? AND deleted_at IS NULL`, status, stoppedAt.UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
 		return fmt.Errorf("finish execution: %w", err)
 	}
@@ -107,11 +150,10 @@ func (s *ExecutionStore) Finish(ctx context.Context, id string, status string, s
 	if affected == 0 {
 		return persistence.ErrNotFound
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE execution_data SET data = ? WHERE execution_id = ?`, payload, id)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE execution_data SET data = ? WHERE execution_id = ?`, payload, id); err != nil {
 		return fmt.Errorf("finish execution data: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *ExecutionStore) MarkWaiting(ctx context.Context, id string, waitTill time.Time, data dataplane.RunExecutionData) error {
@@ -119,7 +161,12 @@ func (s *ExecutionStore) MarkWaiting(ctx context.Context, id string, waitTill ti
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE execution_entity SET status = ?, finished = 0, stopped_at = NULL, wait_till = ? WHERE id = ? AND deleted_at IS NULL`, "waiting", waitTill.UTC().Format(time.RFC3339Nano), id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("mark execution waiting: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE execution_entity SET status = ?, finished = 0, stopped_at = NULL, wait_till = ? WHERE id = ? AND deleted_at IS NULL`, "waiting", waitTill.UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
 		return fmt.Errorf("mark execution waiting: %w", err)
 	}
@@ -127,11 +174,10 @@ func (s *ExecutionStore) MarkWaiting(ctx context.Context, id string, waitTill ti
 	if affected == 0 {
 		return persistence.ErrNotFound
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE execution_data SET data = ? WHERE execution_id = ?`, payload, id)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE execution_data SET data = ? WHERE execution_id = ?`, payload, id); err != nil {
 		return fmt.Errorf("mark execution waiting data: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *ExecutionStore) SetRetryOf(ctx context.Context, id string, retryOf string) error {
@@ -262,75 +308,73 @@ func (s *ExecutionStore) ListPage(ctx context.Context, workflowID string, limit 
 }
 
 func (s *ExecutionStore) DeleteOlderThan(ctx context.Context, cutoff time.Time) (int, error) {
-	rows, err := s.executionIDs(ctx, `WHERE finished = 1 AND deleted_at IS NULL AND started_at < ?`, cutoff.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return 0, err
-	}
-	return s.deleteMany(ctx, rows)
+	return s.pruneExecutions(ctx,
+		`SELECT id FROM execution_entity WHERE finished = 1 AND deleted_at IS NULL AND started_at < ?`,
+		cutoff.UTC().Format(time.RFC3339Nano))
 }
 
 func (s *ExecutionStore) PrunePerWorkflow(ctx context.Context, maxCount int) (int, error) {
 	if maxCount <= 0 {
 		return 0, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	return s.pruneExecutions(ctx, `
 		WITH ranked AS (
 			SELECT id, ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY started_at DESC) AS rn
 			FROM execution_entity
 			WHERE finished = 1 AND deleted_at IS NULL
 		)
 		SELECT id FROM ranked WHERE rn > ?`, maxCount)
+}
+
+// Select and delete in one transaction so a concurrent revive can't slip between them.
+func (s *ExecutionStore) pruneExecutions(ctx context.Context, selectSQL string, args ...any) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("prune executions: %w", err)
 	}
-	defer rows.Close()
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, selectSQL, args...)
+	if err != nil {
+		return 0, fmt.Errorf("prune executions: %w", err)
+	}
 	ids := []string{}
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return 0, err
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return 0, err
 	}
-	return s.deleteMany(ctx, ids)
-}
-
-func (s *ExecutionStore) executionIDs(ctx context.Context, where string, args ...any) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM execution_entity `+where, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list execution ids: %w", err)
-	}
-	defer rows.Close()
-	ids := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-func (s *ExecutionStore) deleteMany(ctx context.Context, ids []string) (int, error) {
-	deleted := 0
+	rows.Close()
 	for _, id := range ids {
-		if err := s.Delete(ctx, id); err != nil {
-			return deleted, err
+		if _, err := tx.ExecContext(ctx, `DELETE FROM execution_data WHERE execution_id = ?`, id); err != nil {
+			return 0, fmt.Errorf("delete execution data: %w", err)
 		}
-		deleted++
+		if _, err := tx.ExecContext(ctx, `DELETE FROM execution_entity WHERE id = ?`, id); err != nil {
+			return 0, fmt.Errorf("delete execution: %w", err)
+		}
 	}
-	return deleted, nil
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("prune executions: %w", err)
+	}
+	return len(ids), nil
 }
 
 func (s *ExecutionStore) Delete(ctx context.Context, id string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM execution_data WHERE execution_id = ?`, id); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("delete execution: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM execution_data WHERE execution_id = ?`, id); err != nil {
 		return fmt.Errorf("delete execution data: %w", err)
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM execution_entity WHERE id = ?`, id)
+	result, err := tx.ExecContext(ctx, `DELETE FROM execution_entity WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete execution: %w", err)
 	}
@@ -338,7 +382,7 @@ func (s *ExecutionStore) Delete(ctx context.Context, id string) error {
 	if affected == 0 {
 		return persistence.ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 func scanExecution(row scanner) (*persistence.ExecutionRow, error) {

@@ -9,7 +9,10 @@ import (
 	"github.com/n8n-io/n8n-turbo/internal/credentials"
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
 	"github.com/n8n-io/n8n-turbo/internal/persistence"
+	"golang.org/x/sync/singleflight"
 )
+
+var oauthRefreshGroup singleflight.Group
 
 func (s *Server) resolveNodeCredentials(ctx context.Context, node dataplane.Node) (map[string]map[string]any, error) {
 	result := make(map[string]map[string]any, len(node.Credentials))
@@ -51,10 +54,38 @@ func (s *Server) refreshNodeCredentialIfNeeded(ctx context.Context, row *persist
 	if accessToken != "" && !credentials.OAuth2TokenExpired(expiresAt) {
 		return nil
 	}
+	refreshed, err, _ := oauthRefreshGroup.Do(row.ID, func() (any, error) {
+		return s.refreshOAuthTokenFields(ctx, row)
+	})
+	if err != nil {
+		return err
+	}
+	if fields, ok := refreshed.(map[string]any); ok {
+		for key, value := range fields {
+			data[key] = value
+		}
+	}
+	return nil
+}
+
+func (s *Server) refreshOAuthTokenFields(ctx context.Context, row *persistence.CredentialRow) (map[string]any, error) {
+	fresh, err := s.credentialStore.GetByID(ctx, row.ID)
+	if err != nil {
+		return nil, err
+	}
+	data, err := s.decryptCredentialData(fresh.Data)
+	if err != nil {
+		return nil, err
+	}
+	data["id"] = fresh.ID
+	data["name"] = fresh.Name
+	data["type"] = fresh.Type
+	if token := stringFromMap(data, "accessToken"); token != "" && !credentials.OAuth2TokenExpired(stringFromMap(data, "expiresAt")) {
+		return oauthTokenFields(data), nil
+	}
 	cred := oauth2CredentialFromData(data)
 	refreshToken := firstNonEmpty(stringFromMap(data, "refreshToken"), cred.RefreshToken)
 	var token *credentials.OAuth2TokenResponse
-	var err error
 	if refreshToken != "" {
 		token, err = cred.Refresh(ctx, http.DefaultClient, refreshToken)
 		if err == nil && token.RefreshToken == "" {
@@ -64,12 +95,25 @@ func (s *Server) refreshNodeCredentialIfNeeded(ctx context.Context, row *persist
 		token, err = cred.ClientCredentials(ctx, http.DefaultClient)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if token == nil {
-		return nil
+		return oauthTokenFields(data), nil
 	}
-	return s.saveOAuthToken(ctx, row, data, token)
+	if err := s.saveOAuthToken(ctx, fresh, data, token); err != nil {
+		return nil, err
+	}
+	return oauthTokenFields(data), nil
+}
+
+func oauthTokenFields(data map[string]any) map[string]any {
+	fields := make(map[string]any, 8)
+	for _, key := range []string{"accessToken", "tokenType", "expiresIn", "expiresAt", "refreshToken", "scope", "idToken", "oauthTokenData"} {
+		if value, ok := data[key]; ok {
+			fields[key] = value
+		}
+	}
+	return fields
 }
 
 func isOAuthCredential(credentialType string, data map[string]any) bool {

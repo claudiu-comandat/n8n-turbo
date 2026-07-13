@@ -219,9 +219,15 @@ func (d *LocalDistributor) WaitResult(ctx context.Context, jobID string) (JobRes
 	case result := <-ch:
 		return result, nil
 	case <-ctx.Done():
-		d.waiters.Delete(jobID)
+		// !ok means Acknowledge already claimed the channel and will send; drain it.
+		if _, ok := d.waiters.LoadAndDelete(jobID); !ok {
+			return <-ch, nil
+		}
 		return JobResult{}, fmt.Errorf("wait result canceled: %w", ctx.Err())
 	case <-d.done:
+		if _, ok := d.waiters.LoadAndDelete(jobID); !ok {
+			return <-ch, nil
+		}
 		return JobResult{}, ErrDistributorClosed
 	}
 }

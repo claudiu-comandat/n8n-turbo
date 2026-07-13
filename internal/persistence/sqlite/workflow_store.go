@@ -121,6 +121,7 @@ func (s *WorkflowStore) Save(ctx context.Context, workflow dataplane.Workflow, o
 	if workflow.ID == "" {
 		workflow.ID = newID()
 	}
+	baseVersion := workflow.VersionID
 	workflow.VersionID = newID()
 	nodes := mustJSON(workflow.Nodes, "[]")
 	connections := mustJSON(workflow.Connections, "{}")
@@ -128,6 +129,30 @@ func (s *WorkflowStore) Save(ctx context.Context, workflow dataplane.Workflow, o
 	staticData := mustJSON(workflow.StaticData, "{}")
 	pinData := mustJSON(workflow.PinData, "{}")
 	meta := mustJSON(workflow.Meta, "{}")
+
+	// Optimistic concurrency: overwrite only if the stored version still matches.
+	if baseVersion != "" {
+		result, err := s.db.ExecContext(ctx, `
+			UPDATE workflow_entity SET
+				name = ?, active = ?, nodes = ?, connections = ?, settings = ?,
+				static_data = ?, pin_data = ?, version_id = ?, meta = ?, owner_id = ?, updated_at = ?
+			WHERE id = ? AND version_id = ?`,
+			workflow.Name, boolToInt(workflow.Active), nodes, connections, settings,
+			staticData, pinData, workflow.VersionID, meta, ownerID,
+			now.Format(time.RFC3339Nano), workflow.ID, baseVersion)
+		if err != nil {
+			return nil, fmt.Errorf("save workflow: %w", err)
+		}
+		if affected, _ := result.RowsAffected(); affected > 0 {
+			return s.GetByID(ctx, workflow.ID)
+		}
+		if _, err := s.GetByID(ctx, workflow.ID); err == nil {
+			return nil, persistence.ErrVersionConflict
+		} else if err != persistence.ErrNotFound {
+			return nil, err
+		}
+	}
+
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workflow_entity (id, name, active, nodes, connections, settings, static_data, pin_data, version_id, meta, owner_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

@@ -93,7 +93,12 @@ func (s *CredentialStore) Save(ctx context.Context, credential persistence.Crede
 	if len(credential.Data) == 0 {
 		credential.Data = json.RawMessage("{}")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("save credential: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO credentials_entity (id, name, type, data, owner_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -109,39 +114,43 @@ func (s *CredentialStore) Save(ctx context.Context, credential persistence.Crede
 		credential.OwnerID,
 		now.Format(time.RFC3339Nano),
 		now.Format(time.RFC3339Nano),
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("save credential: %w", err)
 	}
 	if credential.OwnerID != "" {
-		_, err = s.db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO credential_sharing (credential_id, user_id, role)
 			VALUES (?, ?, 'owner')
 			ON CONFLICT(credential_id, user_id) DO UPDATE SET role = excluded.role`,
 			credential.ID,
 			credential.OwnerID,
-		)
-		if err != nil {
+		); err != nil {
 			return nil, fmt.Errorf("save credential sharing: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("save credential: %w", err)
 	}
 	return s.GetByID(ctx, credential.ID)
 }
 
 func (s *CredentialStore) Delete(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM credentials_entity WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("delete credential: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err == nil && affected == 0 {
-		return persistence.ErrNotFound
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM credential_sharing WHERE credential_id = ?`, id)
-	if err != nil {
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM credential_sharing WHERE credential_id = ?`, id); err != nil {
 		return fmt.Errorf("delete credential sharing: %w", err)
 	}
-	return nil
+	result, err := tx.ExecContext(ctx, `DELETE FROM credentials_entity WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete credential: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return persistence.ErrNotFound
+	}
+	return tx.Commit()
 }
 
 func scanCredential(row scanner) (*persistence.CredentialRow, error) {

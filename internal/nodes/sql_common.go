@@ -124,34 +124,12 @@ func sqlExecuteQueryWithRunner(ctx context.Context, runner sqlRunner, in engine.
 			output = append(output, rows...)
 			continue
 		}
-		result, err := runner.ExecContext(ctx, query, args...)
-		if err != nil {
+		if _, err := runner.ExecContext(ctx, query, args...); err != nil {
 			return nil, err
 		}
-		output = append(output, sqlResultItem(result))
+		output = append(output, dataplane.Item{JSON: map[string]any{"success": true}})
 	}
 	return dataplane.MainOutput(output), nil
-}
-
-func sqlLegacyExecuteQuery(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect sqlDialect) (dataplane.Output, error) {
-	items := firstInput(in.InputData)
-	query := strings.TrimSpace(fmt.Sprint(resolveValue(in, items, 0, in.Node.Parameters["query"])))
-	if query == "" {
-		return nil, fmt.Errorf("%s query is required", dialect.Name)
-	}
-	args := sqlArgsForQuery(in, items, 0, query, dialect)
-	if sqlReturnsRows(query) {
-		rows, err := sqlQueryRows(ctx, db, query, args...)
-		if err != nil {
-			return nil, err
-		}
-		return dataplane.MainOutput(rows), nil
-	}
-	result, err := db.ExecContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	return dataplane.MainOutput([]dataplane.Item{sqlResultItem(result)}), nil
 }
 
 func sqlInsert(ctx context.Context, db *sql.DB, in engine.ExecuteInput, dialect sqlDialect) (dataplane.Output, error) {

@@ -78,7 +78,7 @@ func slackUploadContent(ctx context.Context, in engine.ExecuteInput) ([]byte, er
 }
 
 func (e Executor) slackGetUploadURL(ctx context.Context, baseURL string, token string, fileName string, length int) (slackUploadURLResponse, error) {
-	globalSlackLimiter.wait("files.getUploadURLExternal")
+	globalSlackLimiter.wait(ctx, "files.getUploadURLExternal")
 	endpoint, err := url.Parse(baseURL + "/files.getUploadURLExternal")
 	if err != nil {
 		return slackUploadURLResponse{}, err
@@ -131,7 +131,7 @@ func (e Executor) slackUploadToURL(ctx context.Context, uploadURL string, fileNa
 }
 
 func (e Executor) slackCompleteUpload(ctx context.Context, baseURL string, token string, fileID string, params map[string]any) (any, error) {
-	globalSlackLimiter.wait("files.completeUploadExternal")
+	globalSlackLimiter.wait(ctx, "files.completeUploadExternal")
 	file := map[string]any{"id": fileID}
 	if title := stringValue(params, "title"); title != "" {
 		file["title"] = title
@@ -168,15 +168,26 @@ func (e Executor) slackCompleteUpload(ctx context.Context, baseURL string, token
 	return result, nil
 }
 
-func (r *slackRateLimiter) wait(method string) {
+func (r *slackRateLimiter) wait(ctx context.Context, method string) {
 	interval := slackInterval(method)
+	// Reserve the slot under the lock, then sleep outside it.
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	last := r.buckets[method]
-	if wait := interval - time.Since(last); wait > 0 {
-		time.Sleep(wait)
+	next := r.buckets[method].Add(interval)
+	if now := time.Now(); next.Before(now) {
+		next = now
 	}
-	r.buckets[method] = time.Now()
+	r.buckets[method] = next
+	r.mu.Unlock()
+	delay := time.Until(next)
+	if delay <= 0 {
+		return
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
 }
 
 func slackInterval(method string) time.Duration {

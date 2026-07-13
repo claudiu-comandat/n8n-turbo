@@ -19,6 +19,9 @@ type Service struct {
 	config    config.AuthConfig
 }
 
+// Compared against on failed logins so every path costs one bcrypt (timing-safe).
+var dummyPasswordHash, _ = bcrypt.GenerateFromPassword([]byte("n8n-turbo-login-timing-guard"), bcrypt.DefaultCost)
+
 type LoginResult struct {
 	User      User      `json:"user"`
 	Token     string    `json:"token"`
@@ -58,12 +61,16 @@ func (s *Service) BootstrapOwner(ctx context.Context) error {
 
 func (s *Service) Login(ctx context.Context, email, password string) (*LoginResult, error) {
 	user, err := s.users.GetByEmail(ctx, strings.TrimSpace(email))
-	if err != nil {
-		if err == persistence.ErrNotFound {
-			_, _ = bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
-			return nil, ErrBadCredentials
-		}
+	if err != nil && err != persistence.ErrNotFound {
 		return nil, fmt.Errorf("get user: %w", err)
+	}
+	hash := dummyPasswordHash
+	if user != nil && user.Password != nil && *user.Password != "" {
+		hash = []byte(*user.Password)
+	}
+	passwordErr := bcrypt.CompareHashAndPassword(hash, []byte(password))
+	if user == nil {
+		return nil, ErrBadCredentials
 	}
 	if user.Disabled {
 		return nil, ErrUserDisabled
@@ -71,7 +78,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 	if user.Password == nil || *user.Password == "" {
 		return nil, ErrBadCredentials
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(*user.Password), []byte(password)); err != nil {
+	if passwordErr != nil {
 		return nil, ErrBadCredentials
 	}
 

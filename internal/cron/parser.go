@@ -135,17 +135,23 @@ func parseField(field string, min int, max int) (uint64, error) {
 			continue
 		}
 		step := 1
+		hasStep := false
 		if before, after, ok := strings.Cut(part, "/"); ok {
 			parsed, err := strconv.Atoi(after)
 			if err != nil || parsed <= 0 {
 				return 0, fmt.Errorf("invalid step %q", after)
 			}
 			step = parsed
+			hasStep = true
 			part = before
 		}
 		start, end, err := parseRange(part, min, max)
 		if err != nil {
 			return 0, err
+		}
+		// N/step runs N..max, like */step.
+		if hasStep && part != "*" && !strings.Contains(part, "-") {
+			end = max
 		}
 		for value := start; value <= end; value += step {
 			mask |= 1 << uint(value)
