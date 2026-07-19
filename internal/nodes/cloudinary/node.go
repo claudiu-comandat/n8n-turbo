@@ -208,8 +208,14 @@ func additionalFields(params map[string]any) map[string]string {
 }
 
 func fileParam(params map[string]any, item dataplane.Item) string {
+	// An explicit top-level `file` param always wins (user chose URL upload).
 	if text := stringParam(params, "file"); text != "" && !strings.HasPrefix(text, "={{") {
 		return text
+	}
+	// If the item carries binary, upload that — do NOT let an unrelated JSON `url`/`file`
+	// field (common on scraped/DB items) silently override the attached image.
+	if len(item.Binary) > 0 {
+		return ""
 	}
 	for _, key := range []string{"file", "url", "secure_url", "imageUrl", "fileUrl"} {
 		if item.JSON != nil {
