@@ -120,20 +120,23 @@ func (s *Server) handleSaveCredential(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.ID != "" {
 		existing, err := s.credentialStore.GetByID(r.Context(), payload.ID)
-		if err != nil {
+		if err == nil {
+			if !credentialCanAccess(*existing, r.Context()) {
+				writeError(w, http.StatusForbidden, "credential access denied")
+				return
+			}
+			existingData, err := s.decryptCredentialData(existing.Data)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			payload.Data = mergeMaskedCredentialData(payload.Data, existingData)
+		} else if err != persistence.ErrNotFound {
 			writeStoreError(w, err)
 			return
 		}
-		if !credentialCanAccess(*existing, r.Context()) {
-			writeError(w, http.StatusForbidden, "credential access denied")
-			return
-		}
-		existingData, err := s.decryptCredentialData(existing.Data)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		payload.Data = mergeMaskedCredentialData(payload.Data, existingData)
+		// err == ErrNotFound: create the credential with this explicit id (lets an
+		// import re-create credentials under the exact ids the workflows reference).
 	}
 	encrypted, err := s.encryptCredentialData(payload.Data)
 	if err != nil {
