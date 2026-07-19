@@ -36,6 +36,10 @@ type workflowStartNode struct {
 }
 
 func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
+	if s.usesFolderAwareList(r) {
+		s.handleListWorkflowsWithFolders(w, r)
+		return
+	}
 	limit := queryInt(r, "limit", 100)
 	if pageStore, ok := s.workflowStore.(workflowPageStore); ok {
 		before, beforeID, err := parseTimeIDCursor(r.URL.Query().Get("cursor"), "workflow")
@@ -49,7 +53,8 @@ func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		page.Rows = filterWorkflowRows(page.Rows, r)
-		s.decorateWorkflowRowsForFrontend(page.Rows)
+		page.Rows = s.filterWorkflowRowsByTag(r.Context(), page.Rows, r)
+		s.decorateWorkflowRowsForFrontend(r.Context(), page.Rows)
 		response := map[string]any{"data": page.Rows}
 		if page.NextCursor != "" {
 			response["nextCursor"] = encodeTimeIDCursor(page.NextCursor)
@@ -63,7 +68,8 @@ func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workflows = filterWorkflowRows(workflows, r)
-	s.decorateWorkflowRowsForFrontend(workflows)
+	workflows = s.filterWorkflowRowsByTag(r.Context(), workflows, r)
+	s.decorateWorkflowRowsForFrontend(r.Context(), workflows)
 	writeJSON(w, http.StatusOK, map[string]any{"data": workflows})
 }
 
@@ -150,9 +156,39 @@ func (s *Server) handleSaveWorkflow(w http.ResponseWriter, r *http.Request) {
 	if id := chi.URLParam(r, "id"); id != "" {
 		workflow.ID = id
 	}
-	if workflow.ID != "" && !jsonObjectHasKey(body, "active") {
-		if existing, err := s.workflowStore.GetByID(r.Context(), workflow.ID); err == nil {
-			workflow.Active = existing.Active
+	// Partial update: a PATCH may send only a few fields (e.g. n8n's "move to folder"
+	// sends {parentFolderId, versionId}). Restore every field the body omitted from the
+	// stored workflow so a metadata patch never wipes nodes/connections/name.
+	if workflow.ID != "" {
+		existing, err := s.workflowStore.GetByID(r.Context(), workflow.ID)
+		if err == nil {
+			existingWorkflow, convErr := workflowFromRow(existing)
+			if convErr == nil {
+				if !jsonObjectHasKey(body, "name") {
+					workflow.Name = existingWorkflow.Name
+				}
+				if !jsonObjectHasKey(body, "nodes") {
+					workflow.Nodes = existingWorkflow.Nodes
+				}
+				if !jsonObjectHasKey(body, "connections") {
+					workflow.Connections = existingWorkflow.Connections
+				}
+				if !jsonObjectHasKey(body, "settings") {
+					workflow.Settings = existingWorkflow.Settings
+				}
+				if !jsonObjectHasKey(body, "staticData") {
+					workflow.StaticData = existingWorkflow.StaticData
+				}
+				if !jsonObjectHasKey(body, "pinData") {
+					workflow.PinData = existingWorkflow.PinData
+				}
+				if !jsonObjectHasKey(body, "meta") {
+					workflow.Meta = existingWorkflow.Meta
+				}
+				if !jsonObjectHasKey(body, "active") {
+					workflow.Active = existingWorkflow.Active
+				}
+			}
 		} else if err != persistence.ErrNotFound {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -173,6 +209,14 @@ func (s *Server) handleSaveWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	if rawTags, ok := workflow.Raw["tags"]; ok && s.tagStore != nil {
+		if tagIDs, tagErr := s.resolveTagPayload(r.Context(), rawTags); tagErr == nil {
+			_ = s.tagStore.SetWorkflowTags(r.Context(), saved.ID, tagIDs)
+		}
+	}
+	if rawParent, ok := workflow.Raw["parentFolderId"]; ok {
+		s.applyWorkflowParentFolder(r, saved.ID, rawParent)
+	}
 	savedWorkflow, err := workflowFromRow(saved)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -188,6 +232,12 @@ func (s *Server) handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err := s.workflowStore.Delete(r.Context(), id); err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	if s.tagStore != nil {
+		_ = s.tagStore.SetWorkflowTags(r.Context(), id, nil)
+	}
+	if s.webhookStore != nil {
+		_ = s.webhookStore.DeleteByWorkflow(r.Context(), id)
 	}
 	s.pushWorkflowDeactivated(id)
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"deleted": true, "id": id}})
@@ -707,9 +757,10 @@ func (s *Server) decorateWorkflowForFrontend(r *http.Request, workflow *dataplan
 	setWorkflowRaw(workflow, "homeProject", projectListItem(s.personalProject(r)))
 	setWorkflowRaw(workflow, "checksum", workflowChecksum(*workflow))
 	setWorkflowRaw(workflow, "sharedWithProjects", []map[string]any{})
-	setWorkflowRaw(workflow, "tags", []map[string]any{})
+	setWorkflowRaw(workflow, "tags", s.workflowTags(r.Context(), workflow.ID))
 	setWorkflowRaw(workflow, "usedCredentials", []map[string]any{})
 	setWorkflowRaw(workflow, "isArchived", false)
+	setWorkflowRaw(workflow, "parentFolder", s.workflowParentFolder(r, workflow.ID))
 	if workflow.Active && workflow.VersionID != "" {
 		setWorkflowRaw(workflow, "activeVersionId", workflow.VersionID)
 		setWorkflowRaw(workflow, "activeVersion", workflowActiveVersion(*workflow))
@@ -781,10 +832,24 @@ func workflowChecksum(workflow dataplane.Workflow) string {
 	return "new"
 }
 
-func (s *Server) decorateWorkflowRowsForFrontend(rows []persistence.WorkflowRow) {
+func (s *Server) decorateWorkflowRowsForFrontend(ctx context.Context, rows []persistence.WorkflowRow) {
 	scopes := frontendWorkflowScopes()
+	tagsByWorkflow := map[string][]persistence.TagRow{}
+	if s.tagStore != nil && len(rows) > 0 {
+		ids := make([]string, 0, len(rows))
+		for i := range rows {
+			ids = append(ids, rows[i].ID)
+		}
+		if loaded, err := s.tagStore.TagsForWorkflows(ctx, ids); err == nil {
+			tagsByWorkflow = loaded
+		}
+	}
 	for index := range rows {
 		rows[index].Scopes = scopes
+		rows[index].Tags = tagsByWorkflow[rows[index].ID]
+		if rows[index].Tags == nil {
+			rows[index].Tags = []persistence.TagRow{}
+		}
 		rows[index].Checksum = rows[index].VersionID
 		if rows[index].Active && strings.TrimSpace(rows[index].VersionID) != "" {
 			versionID := rows[index].VersionID

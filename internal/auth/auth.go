@@ -63,6 +63,12 @@ func UserFromContext(ctx context.Context) (User, bool) {
 	return user, ok
 }
 
+// ContextWithUser attaches an authenticated user to the context. It lets non-JWT
+// authenticators (e.g. an API-key guard) satisfy the same UserFromContext contract.
+func ContextWithUser(ctx context.Context, user User) context.Context {
+	return withUser(ctx, user)
+}
+
 func defaultExpiry(now time.Time, duration time.Duration) time.Time {
 	return now.UTC().Add(duration)
 }

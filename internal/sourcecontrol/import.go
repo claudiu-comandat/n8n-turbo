@@ -87,14 +87,14 @@ func (i *Importer) ImportVariables() ([]persistence.VariableRow, []SourceControl
 }
 
 func (i *Importer) ImportAll() (*PullResult, error) {
-	_, workflowFiles, err := i.ImportWorkflows()
+	workflows, workflowFiles, err := i.ImportWorkflows()
 	if err != nil {
 		return nil, err
 	}
-	_, variableFiles, err := i.ImportVariables()
+	variables, variableFiles, err := i.ImportVariables()
 	if err != nil {
 		return nil, err
 	}
 	files := append(workflowFiles, variableFiles...)
-	return &PullResult{StatusCode: "pulled", Files: files}, nil
+	return &PullResult{StatusCode: "pulled", Files: files, Workflows: workflows, Variables: variables}, nil
 }

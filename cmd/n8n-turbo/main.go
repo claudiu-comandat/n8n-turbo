@@ -85,6 +85,11 @@ func main() {
 		log.Fatal(err)
 	}
 
+	folderStore := sqlite.NewFolderStore(db)
+	if err := folderStore.Init(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+
 	auditStore := sqlite.NewAuditStore(db)
 	if err := auditStore.Init(context.Background()); err != nil {
 		log.Fatal(err)
@@ -98,7 +103,7 @@ func main() {
 
 	authService := auth.NewService(userStore, cfg.EncryptionKey, cfg.Auth)
 
-	server, err := api.NewServer(cfg, authService, userStore, settingsStore, workflowStore, executionStore, credentialStore, variableStore, tagStore, auditStore, insightsStore, vault, webhookStore)
+	server, err := api.NewServer(cfg, authService, userStore, settingsStore, workflowStore, executionStore, credentialStore, variableStore, tagStore, folderStore, auditStore, insightsStore, vault, webhookStore)
 	if err != nil {
 		log.Fatal(err)
 	}

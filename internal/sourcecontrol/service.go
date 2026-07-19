@@ -36,6 +36,18 @@ func NewService(repoPath string, configRepo ConfigRepository) (*Service, error) 
 	}, nil
 }
 
+// CurrentConfig returns the active configuration, or nil when not connected.
+func (s *Service) CurrentConfig() *Config {
+	return s.config
+}
+
+// Disconnect clears the stored connection.
+func (s *Service) Disconnect(ctx context.Context) error {
+	s.config = nil
+	s.gitClient = nil
+	return s.configRepo.Save(ctx, Config{})
+}
+
 func (s *Service) Connect(ctx context.Context, cfg Config) error {
 	if cfg.Branch == "" {
 		cfg.Branch = "main"
@@ -119,7 +131,7 @@ func (s *Service) Push(ctx context.Context, deps PushDependencies, opts PushOpti
 	return &PushResult{Status: "pushed", Files: files, Commit: hash}, nil
 }
 
-func (s *Service) Pull(ctx context.Context, force bool) (*PullResult, error) {
+func (s *Service) Pull(ctx context.Context, force bool, target ImportTarget) (*PullResult, error) {
 	if s.gitClient == nil || s.config == nil {
 		return nil, fmt.Errorf("source control is not connected")
 	}
@@ -141,7 +153,23 @@ func (s *Service) Pull(ctx context.Context, force bool) (*PullResult, error) {
 		}
 		return nil, err
 	}
-	return s.importer.ImportAll()
+	result, err := s.importer.ImportAll()
+	if err != nil {
+		return nil, err
+	}
+	if target != nil {
+		for _, row := range result.Workflows {
+			if err := target.ApplyWorkflow(ctx, row); err != nil {
+				return nil, fmt.Errorf("apply workflow %s: %w", row.ID, err)
+			}
+		}
+		for _, row := range result.Variables {
+			if err := target.ApplyVariable(ctx, row); err != nil {
+				return nil, fmt.Errorf("apply variable %s: %w", row.ID, err)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) Status(ctx context.Context) (*StatusResult, error) {

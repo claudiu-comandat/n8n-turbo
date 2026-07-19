@@ -58,6 +58,7 @@ type WorkflowRow struct {
 	Checksum        string          `json:"checksum,omitempty"`
 	Meta            json.RawMessage `json:"meta"`
 	Scopes          []string        `json:"scopes,omitempty"`
+	Tags            []TagRow        `json:"tags"`
 	OwnerID         string          `json:"-"`
 	CreatedAt       time.Time       `json:"createdAt"`
 	UpdatedAt       time.Time       `json:"updatedAt"`
@@ -162,6 +163,29 @@ type TagStore interface {
 	GetByID(ctx context.Context, id string) (*TagRow, error)
 	Save(ctx context.Context, tag TagRow) (*TagRow, error)
 	Delete(ctx context.Context, id string) error
+	SetWorkflowTags(ctx context.Context, workflowID string, tagIDs []string) error
+	ListTagsForWorkflow(ctx context.Context, workflowID string) ([]TagRow, error)
+	TagsForWorkflows(ctx context.Context, workflowIDs []string) (map[string][]TagRow, error)
+	WorkflowIDsByTag(ctx context.Context, tagID string) ([]string, error)
+}
+
+type FolderRow struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	ParentFolderID *string   `json:"parentFolderId"`
+	ProjectID      string    `json:"projectId"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+type FolderStore interface {
+	Init(ctx context.Context) error
+	Create(ctx context.Context, id, name, projectID string, parentFolderID *string) (*FolderRow, error)
+	Rename(ctx context.Context, id, name string) error
+	Move(ctx context.Context, id string, parentFolderID *string) error
+	Delete(ctx context.Context, id string) error
+	GetByID(ctx context.Context, id string) (*FolderRow, error)
+	ListByProject(ctx context.Context, projectID string) ([]FolderRow, error)
 }
 
 type AuditStore interface {

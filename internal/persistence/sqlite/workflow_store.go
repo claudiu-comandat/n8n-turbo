@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/n8n-io/n8n-turbo/internal/dataplane"
@@ -33,6 +34,7 @@ func (s *WorkflowStore) Init(ctx context.Context) error {
 			version_id TEXT NOT NULL,
 			meta TEXT,
 			owner_id TEXT,
+			parent_folder_id TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -41,7 +43,74 @@ func (s *WorkflowStore) Init(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init workflow table: %w", err)
 	}
+	// Best-effort column add for databases created before folders existed.
+	// Fresh databases already have the column, so this errors and is ignored.
+	_, _ = s.db.ExecContext(ctx, `ALTER TABLE workflow_entity ADD COLUMN parent_folder_id TEXT`)
+	_, _ = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_workflow_parent_folder ON workflow_entity(parent_folder_id)`)
 	return nil
+}
+
+// SetWorkflowFolder moves a workflow into a folder (nil parentFolderID -> project root).
+func (s *WorkflowStore) SetWorkflowFolder(ctx context.Context, workflowID string, parentFolderID *string) error {
+	var value any
+	if parentFolderID != nil && *parentFolderID != "" {
+		value = *parentFolderID
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE workflow_entity SET parent_folder_id = ?, updated_at = ? WHERE id = ?`,
+		value, time.Now().UTC().Format(time.RFC3339Nano), workflowID)
+	if err != nil {
+		return fmt.Errorf("set workflow folder: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return persistence.ErrNotFound
+	}
+	return nil
+}
+
+// ParentFoldersFor batch-loads the folder id each workflow sits in (only workflows
+// that are in a folder appear in the map).
+func (s *WorkflowStore) ParentFoldersFor(ctx context.Context, ids []string) (map[string]string, error) {
+	result := map[string]string{}
+	if len(ids) == 0 {
+		return result, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, parent_folder_id FROM workflow_entity WHERE id IN (`+strings.Join(placeholders, ",")+`) AND parent_folder_id IS NOT NULL AND parent_folder_id != ''`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("parent folders for workflows: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, parent string
+		if err := rows.Scan(&id, &parent); err != nil {
+			return nil, err
+		}
+		result[id] = parent
+	}
+	return result, rows.Err()
+}
+
+// WorkflowIDsInFolder returns the workflows directly inside a folder.
+func (s *WorkflowStore) WorkflowIDsInFolder(ctx context.Context, parentFolderID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM workflow_entity WHERE parent_folder_id = ?`, parentFolderID)
+	if err != nil {
+		return nil, fmt.Errorf("workflows in folder: %w", err)
+	}
+	defer rows.Close()
+	result := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result = append(result, id)
+	}
+	return result, rows.Err()
 }
 
 func (s *WorkflowStore) List(ctx context.Context, limit int) ([]persistence.WorkflowRow, error) {

@@ -1,11 +1,20 @@
 package sourcecontrol
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
 	"github.com/n8n-io/n8n-turbo/internal/persistence"
 )
+
+// ImportTarget receives resources parsed from a pull so the caller (server or CLI)
+// can write them back into the database. Kept behind an interface so the git layer
+// never depends on a concrete store.
+type ImportTarget interface {
+	ApplyWorkflow(ctx context.Context, row persistence.WorkflowRow) error
+	ApplyVariable(ctx context.Context, row persistence.VariableRow) error
+}
 
 type Config struct {
 	ID                   string    `json:"id"`
@@ -46,9 +55,11 @@ type PushResult struct {
 }
 
 type PullResult struct {
-	StatusCode string                 `json:"statusCode"`
-	Files      []SourceControlledFile `json:"files"`
-	Conflicts  []string               `json:"conflicts,omitempty"`
+	StatusCode string                    `json:"statusCode"`
+	Files      []SourceControlledFile    `json:"files"`
+	Conflicts  []string                  `json:"conflicts,omitempty"`
+	Workflows  []persistence.WorkflowRow `json:"-"`
+	Variables  []persistence.VariableRow `json:"-"`
 }
 
 type StatusResult struct {
@@ -79,7 +90,6 @@ type WorkflowExport struct {
 	PinData     json.RawMessage `json:"pinData,omitempty"`
 	Meta        json.RawMessage `json:"meta,omitempty"`
 	VersionID   string          `json:"versionId,omitempty"`
-	ExportedAt  string          `json:"exportedAt"`
 }
 
 type CredentialExport struct {

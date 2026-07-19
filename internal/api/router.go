@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -34,6 +35,7 @@ import (
 	"github.com/n8n-io/n8n-turbo/internal/persistence"
 	"github.com/n8n-io/n8n-turbo/internal/push"
 	"github.com/n8n-io/n8n-turbo/internal/secrets"
+	"github.com/n8n-io/n8n-turbo/internal/sourcecontrol"
 	"github.com/n8n-io/n8n-turbo/internal/webhook"
 )
 
@@ -48,6 +50,7 @@ type Server struct {
 	credentialStore  persistence.CredentialStore
 	variableStore    persistence.VariableStore
 	tagStore         persistence.TagStore
+	folderStore      persistence.FolderStore
 	auditStore       persistence.AuditStore
 	insightsStore    persistence.InsightsStore
 	webhookStore     webhook.Store
@@ -62,6 +65,7 @@ type Server struct {
 	rateLimiter      *rateLimiter
 	vault            *credentials.Vault
 	secretsManager   *secrets.Manager
+	sourceControl    *sourcecontrol.Service
 	router           http.Handler
 }
 
@@ -81,6 +85,7 @@ func NewServer(
 	credentialStore persistence.CredentialStore,
 	variableStore persistence.VariableStore,
 	tagStore persistence.TagStore,
+	folderStore persistence.FolderStore,
 	auditStore persistence.AuditStore,
 	insightsStore persistence.InsightsStore,
 	vault *credentials.Vault,
@@ -101,6 +106,15 @@ func NewServer(
 		return nil, err
 	}
 
+	sourceControlPath := filepath.Join(filepath.Dir(cfg.Database.SQLitePath), "source-control")
+	sourceControlService, err := sourcecontrol.NewService(sourceControlPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := sourceControlService.Load(context.Background()); err != nil {
+		log.Printf("source control: load config: %v", err)
+	}
+
 	server := &Server{
 		config:          cfg,
 		runtimeCtx:      context.Background(),
@@ -112,11 +126,13 @@ func NewServer(
 		credentialStore: credentialStore,
 		variableStore:   variableStore,
 		tagStore:        tagStore,
+		folderStore:     folderStore,
 		auditStore:      auditStore,
 		insightsStore:   insightsStore,
 		webhookStore:    webhookStore,
 		vault:           vault,
 		secretsManager:  secrets.NewManager(secrets.NewEnvProvider("")),
+		sourceControl:   sourceControlService,
 		logStream:       logstream.New(1000),
 		binaryStore:     binaryStore,
 		rateLimiter:     newRateLimiter(600, time.Minute),
@@ -191,7 +207,7 @@ func NewServer(
 	router.Handle("/push", server.pushHub)
 	router.Handle("/rest/push", server.pushHub)
 	router.Group(func(r chi.Router) {
-		r.Use(auth.Middleware(authService, cfg.Auth))
+		r.Use(server.authGuard)
 		r.Use(server.auditMiddleware)
 		r.Get("/rest/audit", server.handleListAuditEvents)
 		r.Patch("/rest/settings", server.handleUpdateSettings)
@@ -203,6 +219,14 @@ func NewServer(
 		r.Get("/rest/projects/count", server.handleProjectsCount)
 		r.Get("/rest/projects/sharing-candidates", server.handleProjectSharingCandidates)
 		r.Get("/rest/projects/{id}", server.handleProject)
+		r.Get("/rest/projects/{id}/folders", server.handleListFolders)
+		r.Post("/rest/projects/{id}/folders", server.handleCreateFolder)
+		r.Get("/rest/projects/{id}/folders/{folderId}/tree", server.handleFolderTree)
+		r.Get("/rest/projects/{id}/folders/{folderId}/content", server.handleFolderContent)
+		r.Get("/rest/projects/{id}/folders/{folderId}/credentials", server.handleFolderCredentials)
+		r.Patch("/rest/projects/{id}/folders/{folderId}", server.handleUpdateFolder)
+		r.Delete("/rest/projects/{id}/folders/{folderId}", server.handleDeleteFolder)
+		r.Put("/rest/projects/{id}/folders/{folderId}/transfer", server.handleTransferFolder)
 		r.Get("/rest/roles", server.handleRoles)
 		r.Get("/rest/favorites", server.handleListFavorites)
 		r.Post("/rest/favorites", server.handleAddFavorite)
@@ -246,6 +270,8 @@ func NewServer(
 		r.Post("/rest/executions/delete", server.handleDeleteExecutions)
 		r.Get("/rest/active-workflows", server.handleLegacyActiveWorkflows)
 		r.Post("/rest/webhooks/find", server.handleFindWebhook)
+		r.Get("/rest/webhooks/find", server.handleFindWebhook)
+		r.Get("/rest/process-catalog", server.handleProcessCatalog)
 		r.Get("/rest/executions/{id}", server.handleGetExecution)
 		r.Delete("/rest/executions/{id}", server.handleDeleteExecution)
 		r.Post("/rest/executions/{id}/stop", server.handleStopExecution)
@@ -592,7 +618,7 @@ func (s *Server) defaultSettings() map[string]any {
 			"swaggerUi":     map[string]any{"enabled": true},
 		},
 		"mfa":      map[string]any{"enabled": false, "enforced": false},
-		"folders":  map[string]any{"enabled": false},
+		"folders":  map[string]any{"enabled": true},
 		"security": map[string]any{"blockFileAccessToN8nFiles": false},
 		"userManagement": map[string]any{
 			"enabled":              true,
@@ -810,7 +836,7 @@ func cors(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 		}
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Request-ID, Accept")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Request-ID, Accept, X-N8N-API-KEY")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 		w.Header().Set("Access-Control-Max-Age", "86400")

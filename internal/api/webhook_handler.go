@@ -619,8 +619,66 @@ func (s *Server) findWebhookWorkflow(r *http.Request, path string, isTest bool) 
 	return s.findHTTPTriggerWorkflow(r, path, isTest, map[string]bool{"n8n-nodes-base.webhook": true}, "webhook")
 }
 
+// handleFindWebhook answers "which process handles this webhook path?" across ALL
+// workflows (active or not) — the thing you currently reverse-engineer from the
+// execution history. Empty path + a workflowId returns every trigger in that
+// workflow; a path substring searches every registered path.
 func (s *Server) handleFindWebhook(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": nil})
+	var body struct {
+		Path       string `json:"path"`
+		WorkflowID string `json:"workflowId"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	pathQuery := strings.ToLower(strings.Trim(firstNonEmpty(body.Path, r.URL.Query().Get("path")), "/"))
+	workflowFilter := firstNonEmpty(body.WorkflowID, r.URL.Query().Get("workflowId"))
+
+	entries, err := s.collectProcessCatalog(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type webhookHit struct {
+		WorkflowID   string `json:"workflowId"`
+		WorkflowName string `json:"workflowName"`
+		Folder       string `json:"folder"`
+		Active       bool   `json:"active"`
+		NodeName     string `json:"nodeName"`
+		NodeType     string `json:"nodeType"`
+		Kind         string `json:"kind"`
+		Method       string `json:"method"`
+		Path         string `json:"path"`
+		Disabled     bool   `json:"disabled"`
+	}
+	results := []webhookHit{}
+	for _, entry := range entries {
+		if workflowFilter != "" && entry.WorkflowID != workflowFilter {
+			continue
+		}
+		for _, trigger := range entry.Triggers {
+			if trigger.Kind != "webhook" && trigger.Kind != "form" {
+				continue
+			}
+			if pathQuery != "" && !strings.Contains(strings.ToLower(trigger.Path), pathQuery) {
+				continue
+			}
+			results = append(results, webhookHit{
+				WorkflowID:   entry.WorkflowID,
+				WorkflowName: entry.WorkflowName,
+				Folder:       entry.Folder,
+				Active:       entry.Active,
+				NodeName:     trigger.NodeName,
+				NodeType:     trigger.NodeType,
+				Kind:         trigger.Kind,
+				Method:       trigger.Method,
+				Path:         trigger.Path,
+				Disabled:     trigger.Disabled,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": results, "count": len(results)})
 }
 
 func (s *Server) findFormWorkflow(r *http.Request, path string, isTest bool) (*webhookMatch, error) {

@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -361,84 +359,3 @@ func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": true})
 }
 
-func defaultSourceControlPreferences() map[string]any {
-	return map[string]any{
-		"branchName":       "",
-		"branches":         []string{},
-		"branchReadOnly":   false,
-		"branchColor":      "#5296D6",
-		"connected":        false,
-		"repositoryUrl":    "",
-		"publicKey":        "",
-		"keyGeneratorType": "ed25519",
-		"connectionType":   "ssh",
-		"currentBranch":    "",
-	}
-}
-
-func (s *Server) handleSourceControlPreferences(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": defaultSourceControlPreferences()})
-}
-
-func (s *Server) handleSaveSourceControlPreferences(w http.ResponseWriter, r *http.Request) {
-	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid source control preferences body")
-		return
-	}
-	response := defaultSourceControlPreferences()
-	deepMerge(response, payload)
-	writeJSON(w, http.StatusOK, map[string]any{"data": response})
-}
-
-func (s *Server) handleSourceControlBranches(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"branches": []string{}, "currentBranch": ""}})
-}
-
-func (s *Server) handleSourceControlStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]any{
-			"ahead":      0,
-			"behind":     0,
-			"conflicted": []string{},
-			"created":    []string{},
-			"current":    "",
-			"deleted":    []string{},
-			"detached":   false,
-			"files":      []map[string]any{},
-			"modified":   []string{},
-			"not_added":  []string{},
-			"renamed":    []string{},
-			"staged":     []string{},
-			"tracking":   nil,
-		},
-	})
-}
-
-func (s *Server) handleSourceControlAggregatedStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": []map[string]any{}})
-}
-
-func (s *Server) handleSourceControlGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
-	key := make([]byte, 24)
-	_, _ = rand.Read(key)
-	publicKey := "ssh-ed25519 " + base64.StdEncoding.EncodeToString(key) + " n8n-turbo"
-	writeJSON(w, http.StatusOK, map[string]any{"data": publicKey})
-}
-
-func (s *Server) handleSourceControlDisconnect(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": "disconnected"})
-}
-
-func (s *Server) handleSourceControlPushWorkfolder(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]any{
-			"files":  []map[string]any{},
-			"commit": nil,
-		},
-	})
-}
-
-func (s *Server) handleSourceControlPullWorkfolder(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": []map[string]any{}})
-}

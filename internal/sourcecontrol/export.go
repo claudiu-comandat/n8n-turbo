@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/n8n-io/n8n-turbo/internal/persistence"
 )
@@ -57,11 +56,9 @@ func (e *Exporter) ExportWorkflows(workflows []persistence.WorkflowRow) ([]strin
 	}
 	files := []string{}
 	for _, workflow := range workflows {
-		name := workflow.Name
-		if name == "" {
-			name = workflow.ID
-		}
-		relative := filepath.ToSlash(filepath.Join(WorkflowsDir, sanitizeFilename(name)+"."+workflow.ID+".json"))
+		// Name-independent, id-based filename: renaming a workflow edits the file's
+		// contents, not its path, so git sees a clean diff instead of delete+create.
+		relative := filepath.ToSlash(filepath.Join(WorkflowsDir, workflow.ID+".json"))
 		export := WorkflowExport{
 			ID:          workflow.ID,
 			Name:        workflow.Name,
@@ -73,7 +70,6 @@ func (e *Exporter) ExportWorkflows(workflows []persistence.WorkflowRow) ([]strin
 			PinData:     workflow.PinData,
 			Meta:        workflow.Meta,
 			VersionID:   workflow.VersionID,
-			ExportedAt:  time.Now().UTC().Format(time.RFC3339),
 		}
 		if err := writeJSONFile(filepath.Join(e.repoPath, filepath.FromSlash(relative)), export); err != nil {
 			return nil, fmt.Errorf("export workflow %s: %w", workflow.ID, err)
