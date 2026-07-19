@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/n8n-io/n8n-turbo/internal/auth"
@@ -35,11 +36,19 @@ func (s *Server) authGuard(next http.Handler) http.Handler {
 // key and, on a match, resolves the owning user so downstream handlers see a
 // normal authenticated user.
 func (s *Server) validateAPIKey(r *http.Request, presented string) (auth.User, bool) {
+	presentedBytes := []byte(presented)
+	// Universal API key from the environment. Set N8N_TURBO_API_KEY on the deployment
+	// to get a working key even when the Settings → n8n API mint UI is unavailable
+	// (migration convenience). Authenticates as the instance owner.
+	if master := strings.TrimSpace(os.Getenv("N8N_TURBO_API_KEY")); master != "" {
+		if subtle.ConstantTimeCompare([]byte(master), presentedBytes) == 1 {
+			return s.ownerUser(r.Context()), true
+		}
+	}
 	state, err := s.loadAPIKeys(r)
 	if err != nil {
 		return auth.User{}, false
 	}
-	presentedBytes := []byte(presented)
 	for _, key := range state.Keys {
 		if key.APIKey == "" {
 			continue
@@ -49,6 +58,20 @@ func (s *Server) validateAPIKey(r *http.Request, presented string) (auth.User, b
 		}
 	}
 	return auth.User{}, false
+}
+
+// ownerUser resolves the instance owner for env-key auth (no per-key owner metadata).
+func (s *Server) ownerUser(ctx context.Context) auth.User {
+	if s.userStore != nil {
+		if users, err := s.userStore.List(ctx); err == nil {
+			for _, user := range users {
+				if user.Role == "global:owner" {
+					return auth.User{ID: user.ID, Email: user.Email, FirstName: user.FirstName, LastName: user.LastName, Role: user.Role, IsOwner: true}
+				}
+			}
+		}
+	}
+	return auth.User{ID: "owner", Email: "owner@n8n.local", Role: "global:owner", IsOwner: true}
 }
 
 func (s *Server) apiKeyUser(ctx context.Context, key publicAPIKey) auth.User {
