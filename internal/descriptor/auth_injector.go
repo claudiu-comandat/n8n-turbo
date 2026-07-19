@@ -526,7 +526,7 @@ func credentialFromDescriptor(descriptor Descriptor, credentials map[string]map[
 		if credential != nil {
 			return credential
 		}
-		if descriptor.CredentialType == "gmailOAuth2Api" {
+		if descriptor.CredentialType == "gmailOAuth2" {
 			return credentialByType(credentials, "googleOAuth2Api")
 		}
 		if descriptor.CredentialType == "hubspotPrivateAppApi" {

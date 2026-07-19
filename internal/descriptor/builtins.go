@@ -489,7 +489,7 @@ func Builtins() []Descriptor {
 			BaseURL:        "https://gmail.googleapis.com/gmail/v1/users/me",
 			AuthType:       "oauth2",
 			AuthConfig:     map[string]string{"tokenField": "accessToken", "tokenPrefix": "Bearer", "tokenURL": "https://oauth2.googleapis.com/token", "grantType": "refreshToken"},
-			CredentialType: "gmailOAuth2Api",
+			CredentialType: "gmailOAuth2",
 			Category:       "Communication",
 			DefaultHeaders: map[string]string{"Accept": "application/json"},
 			Operations: map[string]Operation{

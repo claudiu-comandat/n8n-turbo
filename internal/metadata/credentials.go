@@ -19,7 +19,7 @@ func CredentialTypes() []CredentialType {
 		genericCredential(credential("oAuth2Api", "OAuth2 API", text("Client ID", "clientId", ""), secret("Client Secret", "clientSecret"), text("Auth URL", "authUrl", ""), text("Access Token URL", "accessTokenUrl", ""), text("Scope", "scope", ""), secret("Access Token", "accessToken"))),
 		credential("slackApi", "Slack API", secret("Access Token", "accessToken")),
 		credential("githubApi", "GitHub API", secret("Access Token", "accessToken")),
-		credential("gmailOAuth2Api", "Gmail OAuth2 API", text("Client ID", "clientId", ""), secret("Client Secret", "clientSecret"), secret("Access Token", "accessToken"), secret("Refresh Token", "refreshToken")),
+		credential("gmailOAuth2", "Gmail OAuth2 API", text("Client ID", "clientId", ""), secret("Client Secret", "clientSecret"), secret("Access Token", "accessToken"), secret("Refresh Token", "refreshToken")),
 		credential("googleOAuth2Api", "Google OAuth2 API", text("Client ID", "clientId", ""), secret("Client Secret", "clientSecret"), secret("Access Token", "accessToken"), secret("Refresh Token", "refreshToken")),
 		credential("googleSheetsOAuth2Api", "Google Sheets OAuth2 API", text("Client ID", "clientId", ""), secret("Client Secret", "clientSecret"), secret("Access Token", "accessToken"), secret("Refresh Token", "refreshToken")),
 		credential("googleApi", "Google Service Account API", text("Email", "email", ""), secret("Private Key", "privateKey")),
@@ -45,6 +45,7 @@ func CredentialTypes() []CredentialType {
 		credential("mySql", "MySQL", text("Host", "host", "localhost"), numberProp("Port", "port", 3306), text("Database", "database", ""), text("User", "user", ""), secret("Password", "password")),
 		credential("redis", "Redis", text("Host", "host", "localhost"), numberProp("Port", "port", 6379), secret("Password", "password"), numberProp("Database Number", "databaseNumber", 0), booleanProp("SSL", "ssl", false), booleanProp("TLS Insecure", "tlsInsecure", false)),
 		credential("mongoDb", "MongoDB", text("Connection String", "connectionString", "mongodb://localhost:27017"), text("Database", "database", ""), text("Authentication Database", "authenticationDatabase", ""), booleanProp("TLS", "tls", false), booleanProp("TLS Insecure", "tlsInsecure", false)),
+		credential("cloudinaryApi", "Cloudinary API", text("Cloud Name", "cloudName", ""), secret("API Key", "apiKey"), secret("API Secret", "apiSecret")),
 	}
 	enrichCredentialTypes(types)
 	sort.Slice(types, func(i, j int) bool { return types[i].Name < types[j].Name })

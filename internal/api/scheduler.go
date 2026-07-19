@@ -15,10 +15,11 @@ import (
 )
 
 type scheduler struct {
-	mu      sync.Mutex
-	jobs    map[string]scheduledJob
-	running map[string]bool
-	leader  schedulerLeader
+	mu         sync.Mutex
+	jobs       map[string]scheduledJob
+	running    map[string]bool
+	leader     schedulerLeader
+	gmailState map[string]*gmailPollState
 }
 
 type schedulerLeader interface {
@@ -40,7 +41,7 @@ type scheduledCandidate struct {
 }
 
 func newScheduler() *scheduler {
-	return &scheduler{jobs: make(map[string]scheduledJob), running: make(map[string]bool)}
+	return &scheduler{jobs: make(map[string]scheduledJob), running: make(map[string]bool), gmailState: make(map[string]*gmailPollState)}
 }
 
 func (s *Server) StartRuntime(ctx context.Context) {
@@ -125,7 +126,7 @@ func (s *Server) syncScheduledWorkflows(ctx context.Context) error {
 			continue
 		}
 		for _, node := range workflow.Nodes {
-			if node.Disabled || node.Type != "n8n-nodes-base.scheduleTrigger" {
+			if node.Disabled || !isPolledTriggerType(node.Type) {
 				continue
 			}
 			desired[scheduledKey(workflow.ID, node.Name)] = scheduledCandidate{workflow: workflow, node: node}
@@ -154,7 +155,7 @@ func (s *Server) syncScheduledWorkflows(ctx context.Context) error {
 func (s *Server) startWorkflowSchedule(ctx context.Context, workflow dataplane.Workflow) {
 	candidates := make(map[string]scheduledCandidate)
 	for _, node := range workflow.Nodes {
-		if node.Disabled || node.Type != "n8n-nodes-base.scheduleTrigger" {
+		if node.Disabled || !isPolledTriggerType(node.Type) {
 			continue
 		}
 		candidates[scheduledKey(workflow.ID, node.Name)] = scheduledCandidate{workflow: workflow, node: node}
@@ -196,8 +197,19 @@ func (s *Server) stopScheduledJobs() {
 	}
 }
 
+func isPolledTriggerType(nodeType string) bool {
+	return nodeType == "n8n-nodes-base.scheduleTrigger" || nodeType == gmailTriggerType
+}
+
+func scheduleExpressionForNode(node dataplane.Node) (string, error) {
+	if node.Type == gmailTriggerType {
+		return nodes.BuildPollTimesCronExpression(node.Parameters)
+	}
+	return nodes.BuildScheduleCronExpression(node.Parameters)
+}
+
 func (s *Server) scheduledLoop(ctx context.Context, workflow dataplane.Workflow, node dataplane.Node) {
-	expr, err := nodes.BuildScheduleCronExpression(node.Parameters)
+	expr, err := scheduleExpressionForNode(node)
 	if err != nil {
 		log.Printf("invalid schedule trigger for workflow %s node %s: %v", workflow.ID, node.Name, err)
 		return
@@ -234,7 +246,11 @@ func (s *Server) scheduledLoop(ctx context.Context, workflow dataplane.Workflow,
 			timer.Stop()
 			return
 		case <-timer.C:
-			s.runScheduledWorkflow(ctx, workflow, node, next)
+			if node.Type == gmailTriggerType {
+				s.pollGmailTrigger(ctx, workflow, node)
+			} else {
+				s.runScheduledWorkflow(ctx, workflow, node, next)
+			}
 			after = time.Now().In(location)
 		}
 	}

@@ -3,6 +3,7 @@ package nodes
 import (
 	"github.com/n8n-io/n8n-turbo/internal/descriptor"
 	"github.com/n8n-io/n8n-turbo/internal/engine"
+	"github.com/n8n-io/n8n-turbo/internal/nodes/cloudinary"
 	"github.com/n8n-io/n8n-turbo/internal/nodes/discord"
 	"github.com/n8n-io/n8n-turbo/internal/nodes/msteams"
 	"github.com/n8n-io/n8n-turbo/internal/nodes/sendgrid"
@@ -52,6 +53,8 @@ func RegisterBuiltins(registry engine.Registry) {
 	registry.Register("n8n-nodes-base.errorTrigger", ErrorTrigger{})
 	registry.Register("n8n-nodes-base.executeWorkflowTrigger", ExecuteWorkflowTrigger{})
 	registry.Register("n8n-nodes-base.scheduleTrigger", ScheduleTrigger{})
+	registry.Register("n8n-nodes-base.gmailTrigger", GmailTrigger{})
+	registry.Register("n8n-nodes-cloudinary.cloudinary", cloudinary.New())
 	registry.Register("n8n-nodes-base.respondToWebhook", RespondToWebhook{})
 	registry.Register("n8n-nodes-base.httpRequest", HTTPRequest{})
 	registry.Register("n8n-nodes-base.n8n", N8n{})

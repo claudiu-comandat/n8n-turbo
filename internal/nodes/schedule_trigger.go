@@ -296,3 +296,80 @@ func anyScheduleMap(value any) map[string]any {
 	}
 	return map[string]any{}
 }
+
+// BuildPollTimesCronExpression maps an n8n "pollTimes" parameter (used by polling
+// triggers such as gmailTrigger) to a 6-field cron expression.
+func BuildPollTimesCronExpression(parameters map[string]any) (string, error) {
+	entry := firstPollTime(parameters)
+	mode := strings.ToLower(strings.TrimSpace(stringParam(entry, "mode")))
+	switch mode {
+	case "", "everyminute":
+		return "0 * * * * *", nil
+	case "everyhour":
+		minute, err := boundedScheduleInt(entry, 0, 59, 0, "minute", "triggerAtMinute")
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("0 %d * * * *", minute), nil
+	case "everyday":
+		hour, err := boundedScheduleInt(entry, 0, 23, 0, "hour", "triggerAtHour")
+		if err != nil {
+			return "", err
+		}
+		minute, err := boundedScheduleInt(entry, 0, 59, 0, "minute", "triggerAtMinute")
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("0 %d %d * * *", minute, hour), nil
+	case "everyweek":
+		hour, err := boundedScheduleInt(entry, 0, 23, 0, "hour", "triggerAtHour")
+		if err != nil {
+			return "", err
+		}
+		minute, err := boundedScheduleInt(entry, 0, 59, 0, "minute", "triggerAtMinute")
+		if err != nil {
+			return "", err
+		}
+		weekday, err := boundedScheduleInt(entry, 0, 6, 0, "weekday", "triggerAtDay")
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("0 %d %d * * %d", minute, hour, weekday), nil
+	case "everyx":
+		return intervalEntryCronExpression(map[string]any{"field": stringParam(entry, "unit"), "value": entry["value"]})
+	case "custom":
+		expr := strings.TrimSpace(stringParam(entry, "cronExpression", "expression"))
+		fields := strings.Fields(expr)
+		if len(fields) == 5 {
+			return "0 " + expr, nil
+		}
+		if len(fields) == 6 || strings.HasPrefix(expr, "@") {
+			return expr, nil
+		}
+		return "", fmt.Errorf("invalid cron expression %q", expr)
+	default:
+		return "0 * * * * *", nil // ponytail: unknown poll mode → default to every minute
+	}
+}
+
+func firstPollTime(parameters map[string]any) map[string]any {
+	raw, ok := parameters["pollTimes"]
+	if !ok {
+		return map[string]any{}
+	}
+	object, ok := rawObject(raw)
+	if !ok {
+		return map[string]any{}
+	}
+	if items, ok := object["item"]; ok {
+		if list, ok := items.([]any); ok && len(list) > 0 {
+			if entry, ok := rawObject(list[0]); ok {
+				return entry
+			}
+		}
+		if entry, ok := rawObject(items); ok {
+			return entry
+		}
+	}
+	return object
+}

@@ -878,7 +878,7 @@ func descriptorCredentialFallbacks(nodeType string) []CredentialUsage {
 	case "n8n-nodes-base.github":
 		return []CredentialUsage{{Name: "githubApi", Required: false}}
 	case "n8n-nodes-base.gmail":
-		return []CredentialUsage{{Name: "gmailOAuth2Api", Required: false}, {Name: "googleOAuth2Api", Required: false}}
+		return []CredentialUsage{{Name: "gmailOAuth2", Required: false}, {Name: "googleOAuth2Api", Required: false}}
 	case "n8n-nodes-base.googleSheets":
 		return []CredentialUsage{{Name: "googleSheetsOAuth2Api", Required: false}, {Name: "googleApi", Required: false}}
 	case "n8n-nodes-base.notion":
